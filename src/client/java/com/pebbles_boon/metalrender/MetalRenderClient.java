@@ -1,96 +1,65 @@
 package com.pebbles_boon.metalrender;
-import com.pebbles_boon.metalrender.backend.MetalRenderer;
+
 import com.pebbles_boon.metalrender.config.MetalRenderConfig;
 import com.pebbles_boon.metalrender.nativebridge.MetalHardwareChecker;
 import com.pebbles_boon.metalrender.nativebridge.NativeBridge;
-import com.pebbles_boon.metalrender.render.MetalWorldRenderer;
-import com.pebbles_boon.metalrender.render.unified.MetalRenderCoordinator;
-import com.pebbles_boon.metalrender.sodium.backend.MeshShaderBackend;
-import com.pebbles_boon.metalrender.sodium.backend.SodiumMetalInterface;
 import com.pebbles_boon.metalrender.util.MetalLogger;
 import net.fabricmc.api.ClientModInitializer;
+
 public class MetalRenderClient implements ClientModInitializer {
-  private static MetalRenderClient instance;
-  private static MetalRenderer renderer;
   private static MetalRenderConfig config;
-  private static MetalRenderCoordinator coordinator;
-  private static MeshShaderBackend meshShaderBackend;
-  private static SodiumMetalInterface sodiumInterface;
-  private static MetalWorldRenderer worldRenderer;
   private static boolean metalAvailable = false;
+
   @Override
   public void onInitializeClient() {
-    instance = this;
-    MetalLogger.info("MetalRender v0.1.7ing...");
+    MetalLogger.info("MetalRender 1.20.1 stub backport initializing — renderer hooks are disabled in this build.");
+
     config = MetalRenderConfig.load();
     if (!config.enableMetalRendering) {
-      MetalLogger.info("MetalRender was killed by [user] using config menu");
+      MetalLogger.info("Metal rendering disabled via config; stub will not probe hardware.");
       return;
     }
+
     try {
       NativeBridge.loadLibrary();
     } catch (UnsatisfiedLinkError e) {
-      MetalLogger.error("got lost finding non-existent native library",
-          e);
+      MetalLogger.warn("Native metalrender library not available: %s", e.getMessage());
+      return;
+    } catch (Throwable t) {
+      MetalLogger.warn("Native metalrender library load failed: %s", t.toString());
       return;
     }
+
     try {
-      if (MetalHardwareChecker.isMetalSupported()) {
-        renderer = new MetalRenderer();
-        renderer.init(0, 0);
-        metalAvailable = renderer.isAvailable();
-        if (metalAvailable) {
-          coordinator = new MetalRenderCoordinator();
-          coordinator.initialize();
-          worldRenderer = new MetalWorldRenderer();
-          meshShaderBackend = new MeshShaderBackend();
-          meshShaderBackend.initialize();
-          MetalLogger.info("Metal ready: " +
-              MetalHardwareChecker.getDeviceName());
-        }
+      metalAvailable = MetalHardwareChecker.isMetalSupported();
+      if (metalAvailable) {
+        MetalLogger.info("Metal device available: %s (stub build, no rendering hooks active)",
+            MetalHardwareChecker.getDeviceName());
       } else {
-        MetalLogger.warn("computer lazy cant even get metal");
+        MetalLogger.info("Metal device probe returned unsupported; stub remains inert.");
       }
-    } catch (Exception e) {
-      MetalLogger.error("Failure", e);
+    } catch (Throwable t) {
+      MetalLogger.warn("Metal hardware probe failed: %s", t.toString());
       metalAvailable = false;
     }
   }
-  public static MetalRenderClient getInstance() {
-    return instance;
-  }
-  public static MetalRenderer getRenderer() {
-    return renderer;
-  }
+
   public static MetalRenderConfig getConfig() {
     return config;
   }
-  public static MetalRenderCoordinator getCoordinator() {
-    return coordinator;
-  }
-  public static MeshShaderBackend getMeshShaderBackend() {
-    return meshShaderBackend;
-  }
+
   public static boolean isMetalAvailable() {
     return metalAvailable;
   }
+
   public static boolean isEnabled() {
-    return metalAvailable && renderer != null && renderer.isAvailable();
+    return false;
   }
-  public static MetalWorldRenderer getWorldRenderer() {
-    return worldRenderer;
-  }
-  public static SodiumMetalInterface getSodiumInterface() {
-    if (sodiumInterface == null) {
-      sodiumInterface = new SodiumMetalInterface();
-    }
-    return sodiumInterface;
-  }
+
   public static boolean isSodiumLoaded() {
     try {
-      return net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded(
-          "sodium");
-    } catch (Exception e) {
+      return net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("sodium");
+    } catch (Throwable t) {
       return false;
     }
   }

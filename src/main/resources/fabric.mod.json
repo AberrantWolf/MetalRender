@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "id": "metalrender",
-  "version": "0.1.7",
+  "version": "${version}",
   "license": "Apache-2.0",
   "authors": [
     "pebbles_boon"
   ],
   "name": "MetalRender",
-  "description": "Experimental Metal-based renderer for Minecraft on macOS.",
+  "description": "Experimental Metal-based renderer for Minecraft on macOS. (1.20.1 stub backport — renderer hooks disabled)",
   "environment": "client",
   "entrypoints": {
     "client": [
@@ -18,11 +18,12 @@
     "metalrender.mixins.json"
   ],
   "depends": {
-    "fabricloader": ">=0.17.1",
-    "minecraft": ">=1.21.11",
-    "fabric": "*"
+    "fabricloader": ">=0.16.10",
+    "minecraft": "~1.20.1",
+    "java": ">=17",
+    "fabric-api": "*"
   },
   "suggests": {
-    "sodium": ">=0.8.0"
+    "sodium": ">=0.5.0"
   }
 }

@@ -1,16 +1,19 @@
 plugins {
-    id 'fabric-loom' version '1.14-SNAPSHOT'
+    id 'fabric-loom' version '1.6-SNAPSHOT'
     id 'maven-publish'
 }
 
 group = "com.metalrender"
-version = "v0.1.7"
+version = "v0.1.7-1.20.1-stub"
 
 java {
-    toolchain.languageVersion = JavaLanguageVersion.of(21)
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+        vendor = JvmVendorSpec.ADOPTIUM
+    }
 }
-repositories {
 
+repositories {
     maven {
         name = "Fabric"
         url = "https://maven.fabricmc.net/"
@@ -20,22 +23,18 @@ repositories {
         name = "Modrinth"
         url = "https://api.modrinth.com/maven"
     }
-        maven {
-            name = "LWJGL"
-            url = "https://repo.lwjgl.org/"
-        }
+    maven {
+        name = "LWJGL"
+        url = "https://repo.lwjgl.org/"
+    }
 }
+
 dependencies {
-    minecraft "com.mojang:minecraft:1.21.11"
-    mappings "net.fabricmc:yarn:1.21.11+build.3:v2"
-    modImplementation "net.fabricmc:fabric-loader:0.18.0"
-    modImplementation "net.fabricmc.fabric-api:fabric-api:0.139.4+1.21.11"
-    modImplementation "org.lwjgl:lwjgl:3.3.3"
-    modImplementation "org.lwjgl:lwjgl-glfw:3.3.3"
-    modImplementation "org.lwjgl:lwjgl:3.3.3:natives-macos"
-    modImplementation "org.lwjgl:lwjgl-glfw:3.3.3:natives-macos"
-    modImplementation 'org.joml:joml:1.10.5'
-    modImplementation "maven.modrinth:sodium:mc1.21.11-0.8.0-fabric"
+    minecraft "com.mojang:minecraft:1.20.1"
+    mappings "net.fabricmc:yarn:1.20.1+build.10:v2"
+    modImplementation "net.fabricmc:fabric-loader:0.16.14"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:0.92.6+1.20.1"
+    modImplementation "maven.modrinth:sodium:mc1.20.1-0.5.11"
 }
 
 loom {
@@ -46,30 +45,19 @@ loom {
             client()
             source sourceSets.client
             vmArg "-Djava.library.path=${projectDir}/src/main/resources"
-            vmArg "--enable-preview"
-            vmArg "--enable-native-access=ALL-UNNAMED"
-            
-            if (project.hasProperty('gl2metal')) {
-                vmArg "-Dmetalrender.gl2metal=true"
-            }
-            
-            ['state', 'drawcalls', 'buffers', 'textures', 'shaders', 'fbos', 'vaos', 'debug'].each { category ->
-                if (project.hasProperty("gl2metal.${category}")) {
-                    vmArg "-Dmetalrender.gl2metal.${category}=true"
-                }
-            }
         }
     }
 }
+
 tasks.withType(JavaCompile).configureEach {
     options.encoding = "UTF-8"
-    options.release = 21
-    options.compilerArgs += ['--enable-preview']
+    options.release = 17
 }
-    jar {
-        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-        from('src/main/resources/native') {
-            include 'metalrender.h', 'metalrender.mm'
-            into 'native'
-        }
+
+jar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from('src/main/resources/native') {
+        include 'metalrender.h', 'metalrender.mm'
+        into 'native'
     }
+}

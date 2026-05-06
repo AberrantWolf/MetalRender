@@ -1,34 +1,11 @@
 {
   "required": true,
-  "minVersion": "0.1.7",
+  "minVersion": "0.8",
   "package": "com.pebbles_boon.metalrender.sodium.mixins",
-  "compatibilityLevel": "JAVA_21",
+  "compatibilityLevel": "JAVA_17",
   "refmap": "metalrender.refmap.json",
   "mixins": [],
-  "client": [
-    "MinecraftClientMixin",
-    "GameRendererMixin",
-    "DrawContextMixin",
-    "RenderSystemFlipMixin",
-    "WindowSwapMixin",
-    "SodiumRendererMixin",
-    "SodiumWorldRendererMixin",
-    "ChunkRenderManagerMixin",
-    "accessor.SpriteAtlasTextureAccessor",
-    "accessor.GameRendererAccessor",
-    "sodiumhook.SodiumWorldRendererMixin_CM",
-    "WorldRendererTerrainMixin",
-    "EntityRenderMixin",
-    "ParticleCaptureMixin",
-    "WorldRendererBlitMixin",
-    "InGameHudMixin",
-    "ClientWorldMixin",
-    "OptionsScreenMixin",
-    "ChunkLoadMixin",
-    "accessor.BillboardParticleAccessor",
-    "accessor.ParticleAccessor",
-    "accessor.ParticleManagerAccessor"
-  ],
+  "client": [],
   "injectors": {
     "defaultRequire": 0
   }

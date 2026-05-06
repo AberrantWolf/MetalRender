@@ -34,3 +34,11 @@ compile_commands.json
 /work files/
 *.txt
 *.out
+
+# Claude Code session/project state
+/.claude/
+.claude.json
+
+# Personal dev helpers (do not commit)
+/launch-dev.sh
+/launch.local.sh
