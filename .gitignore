@@ -42,3 +42,4 @@ compile_commands.json
 # Personal dev helpers (do not commit)
 /launch-dev.sh
 /launch.local.sh
+/compile-dev.sh
