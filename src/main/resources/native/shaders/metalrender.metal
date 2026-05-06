@@ -38,8 +38,6 @@ float2 decodeSodiumTexCoord(uint tex) {
 
 float2 decodeSodiumLight(uint lightData) {
     uint light = lightData & 0xFFFF;
-    float blockLight = float(light & 0xFF) / 256.0;
-    float skyLight   = float((light >> 8) & 0xFF) / 256.0;
     float blockLight = float((light & 0xFF) + 8u) / 256.0;
     float skyLight   = float(((light >> 8) & 0xFF) + 8u) / 256.0;
     return float2(blockLight, skyLight);
@@ -57,7 +55,7 @@ constant half kFaceShade[6] = {
 struct SimpleVertexOut {
     float4 position [[position]];
     float2 texCoord;
-    float4 color;
+    half4  color;
     float2 lightUV;
     half  light;
     uint   normalIndex [[flat]];
@@ -298,7 +296,7 @@ fragment half4 fragment_terrain_icb_cutout(
 }
 struct DebugVertexOut {
     float4 position [[position]];
-    float4 color;
+    half4 color;
 };
 
 vertex DebugVertexOut vertex_debug(
@@ -311,10 +309,10 @@ vertex DebugVertexOut vertex_debug(
     DebugVertexOut out;
     float4 viewPos = modelViewMatrix * float4(float3(positions[vid]), 1.0);
     out.position = projectionMatrix * viewPos;
-    out.color = debugColor;
+    out.color = half4(debugColor);
     return out;
 }
 
 fragment float4 fragment_debug(DebugVertexOut in [[stage_in]]) {
-    return in.color;
+    return float4(in.color);
 }
