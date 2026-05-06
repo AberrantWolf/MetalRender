@@ -1,45 +1,50 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// Sodium 0.5.11 CompactChunkVertex layout (verified against upstream tag mc1.20.1-0.5.11):
+//   bytes  0..5  : 3x ushort  position (x, y, z)   — encoded as (8.0 + v) * 2048.0
+//   byte      6  : uchar       material bits        — material.bits() & 0xFF
+//   byte      7  : uchar       section index
+//   bytes  8..11 : uint        color (ABGR int)     — ColorABGR.withAlpha(rgb, faceShade)
+//                              little-endian byte order: [R, G, B, A]
+//   bytes 12..15 : 2x ushort   texture (u, v)       — round(uv * 32768) & 0xFFFF
+//   bytes 16..19 : uint        light (MC lightmap)  — (skyLight << 20) | (blockLight << 4)
+//                              as bytes: [blockLight*16, 0, skyLight*16, 0]
 struct SodiumVertex {
-    uint posHi;
-    uint posLo;
+    packed_ushort3 pos;
+    uchar materialBits;
+    uchar sectionIndex;
     uint color;
-    uint texture;
+    packed_ushort2 texture;
     uint lightData;
 };
 
-float3 decodeSodiumPosition(uint posHi, uint posLo) {
-    uint xHi = (posHi >>  0) & 0x3FF;
-    uint yHi = (posHi >> 10) & 0x3FF;
-    uint zHi = (posHi >> 20) & 0x3FF;
-    uint xLo = (posLo >>  0) & 0x3FF;
-    uint yLo = (posLo >> 10) & 0x3FF;
-    uint zLo = (posLo >> 20) & 0x3FF;
-    float x = float((xHi << 10) | xLo) / 1048576.0 * 32.0 - 8.0;
-    float y = float((yHi << 10) | yLo) / 1048576.0 * 32.0 - 8.0;
-    float z = float((zHi << 10) | zLo) / 1048576.0 * 32.0 - 8.0;
-    return float3(x, y, z);
+float3 decodeSodiumPosition(packed_ushort3 pos) {
+    // Inverse of encoder: v = pos / 2048.0 - 8.0
+    return float3(ushort3(pos)) / 2048.0 - 8.0;
 }
 
 float4 decodeSodiumColor(uint c) {
-    float a = float((c >> 24) & 0xFF) / 255.0;
-    float r = float((c >> 16) & 0xFF) / 255.0;
+    // ABGR: alpha is high byte, red is low byte
+    float r = float((c >>  0) & 0xFF) / 255.0;
     float g = float((c >>  8) & 0xFF) / 255.0;
-    float b = float((c >>  0) & 0xFF) / 255.0;
+    float b = float((c >> 16) & 0xFF) / 255.0;
+    float a = float((c >> 24) & 0xFF) / 255.0;
     return float4(r, g, b, a);
 }
 
-float2 decodeSodiumTexCoord(uint tex) {
-    float u = float(tex & 0x7FFF) / 32768.0;
-    float v = float((tex >> 16) & 0x7FFF) / 32768.0;
-    return float2(u, v);
+float2 decodeSodiumTexCoord(packed_ushort2 tex) {
+    // Encoder produces values in [0, 32768] for UV in [0, 1]
+    return float2(ushort2(tex)) / 32768.0;
 }
 
 float2 decodeSodiumLight(uint lightData) {
-    uint light = lightData & 0xFFFF;
-    float blockLight = float((light & 0xFF) + 8u) / 256.0;
-    float skyLight   = float(((light >> 8) & 0xFF) + 8u) / 256.0;
+    // MC packs as (skyLight << 20) | (blockLight << 4); read as 2 shorts:
+    //   low short  = blockLight << 4   (low byte = blockLight*16, high byte = 0)
+    //   high short = skyLight  << 4    (low byte = skyLight*16,  high byte = 0)
+    // Lightmap UV samples cell center: (value*16 + 8) / 256 = (value + 0.5) / 16
+    float blockLight = (float(lightData & 0xFFu) + 8.0) / 256.0;
+    float skyLight   = (float((lightData >> 16) & 0xFFu) + 8.0) / 256.0;
     return float2(blockLight, skyLight);
 }
 
@@ -80,7 +85,7 @@ vertex SimpleVertexOut vertex_terrain(
 ) {
     SodiumVertex v = vertices[vid];
     SimpleVertexOut out;
-    float3 localPos = decodeSodiumPosition(v.posHi, v.posLo);
+    float3 localPos = decodeSodiumPosition(v.pos);
     float3 worldPos = localPos + chunkOffset.xyz;
     float4 viewPos = modelViewMatrix * float4(worldPos, 1.0);
     out.position = projectionMatrix * viewPos;
@@ -89,8 +94,10 @@ vertex SimpleVertexOut vertex_terrain(
     out.lightUV  = decodeSodiumLight(v.lightData);
     out.light    = half(max(max(out.lightUV.x,
                                 out.lightUV.y * cameraPosition.w), 0.15f));
-
-    out.normalIndex = (v.lightData >> 16) & 0x7;
+    // Sodium bakes face shade into color.a; kFaceShade lookup is unused on this
+    // path. normalIndex defaulted to top-face (1) -> kFaceShade[1]==1.0 so the
+    // fragment does not double-apply shade.
+    out.normalIndex = 1u;
     return out;
 }
 
@@ -99,23 +106,22 @@ fragment half4 fragment_terrain(
     texture2d<half> blockAtlas  [[texture(0)]],
     texture2d<half> lightmap    [[texture(1)]]
 ) {
-    constexpr sampler texSampler(mag_filter::nearest, min_filter::nearest, mip_filter::nearest);
-    half4 texColor = blockAtlas.sample(texSampler, in.texCoord);
-    half vertAlpha = in.color.a;
+    // Block atlas: nearest, for crisp pixel art.
+    constexpr sampler atlasSampler(mag_filter::nearest, min_filter::nearest, mip_filter::nearest);
+    // Lightmap: linear, so block/sky-light transitions and AO interpolation
+    // are smooth across faces (vanilla MC uses linear here).
+    constexpr sampler lightSampler(mag_filter::linear, min_filter::linear);
+    half4 texColor = blockAtlas.sample(atlasSampler, in.texCoord);
     if (texColor.a < half(0.5)) {
-        if (vertAlpha > half(0.994) && vertAlpha < half(0.998)) {
-
-            texColor.a = half(1.0);
-        } else {
-
-            discard_fragment();
-        }
+        discard_fragment();
     }
-    half4 tinted = texColor * in.color;
-    half faceShade = kFaceShade[min(in.normalIndex, 5u)];
-    half3 light = lightmap.sample(texSampler, in.lightUV).rgb;
-    tinted.rgb *= light * faceShade;
-    return half4(tinted.rgb, vertAlpha < half(0.99) ? vertAlpha : half(1.0));
+    // Sodium 0.5 bakes per-face shade into color.a (range ~0.5..1.0). rgb is
+    // the block tint. The lightmap supplies sky/block light contribution.
+    half3 tint = in.color.rgb;
+    half shade = in.color.a;
+    half3 light = lightmap.sample(lightSampler, in.lightUV).rgb;
+    half3 finalRgb = texColor.rgb * tint * shade * light;
+    return half4(finalRgb, texColor.a);
 }
 
 fragment half4 fragment_terrain_cutout(
@@ -123,14 +129,15 @@ fragment half4 fragment_terrain_cutout(
     texture2d<half> blockAtlas  [[texture(0)]],
     texture2d<half> lightmap    [[texture(1)]]
 ) {
-    constexpr sampler texSampler(mag_filter::nearest, min_filter::nearest, mip_filter::nearest);
-    half4 texColor = blockAtlas.sample(texSampler, in.texCoord);
+    constexpr sampler atlasSampler(mag_filter::nearest, min_filter::nearest, mip_filter::nearest);
+    constexpr sampler lightSampler(mag_filter::linear, min_filter::linear);
+    half4 texColor = blockAtlas.sample(atlasSampler, in.texCoord);
     if (texColor.a < half(0.5)) discard_fragment();
-    half4 tinted = texColor * in.color;
-    half faceShade = kFaceShade[min(in.normalIndex, 5u)];
-    half3 light = lightmap.sample(texSampler, in.lightUV).rgb;
-    tinted.rgb *= light * faceShade;
-    return half4(tinted.rgb, half(1.0));
+    half3 tint = in.color.rgb;
+    half shade = in.color.a;
+    half3 light = lightmap.sample(lightSampler, in.lightUV).rgb;
+    half3 finalRgb = texColor.rgb * tint * shade * light;
+    return half4(finalRgb, half(1.0));
 }
 
 struct InhouseTerrainVertex {

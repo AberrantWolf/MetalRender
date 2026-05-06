@@ -27,6 +27,7 @@ public final class MetalRenderConfig {
   private static volatile boolean swapOpaque = false;
   private static volatile boolean swapCutout = false;
   private static volatile boolean swapTranslucent = false;
+  private static volatile boolean compositorBlitOverlay = false;
   private static volatile boolean aggressiveFrustumCulling = true;
   private static volatile boolean occlusionCulling = false;
   private static volatile boolean dynamicQuality = false;
@@ -65,6 +66,9 @@ public final class MetalRenderConfig {
   }
   public static boolean swapTranslucent() {
     return swapTranslucent;
+  }
+  public static boolean compositorBlitOverlay() {
+    return compositorBlitOverlay;
   }
   public static boolean aggressiveFrustumCulling() {
     return aggressiveFrustumCulling;
@@ -216,6 +220,7 @@ public final class MetalRenderConfig {
     swapOpaque = getBool("metalrender.swap.opaque", swapOpaque);
     swapCutout = getBool("metalrender.swap.cutout", swapCutout);
     swapTranslucent = getBool("metalrender.swap.translucent", swapTranslucent);
+    compositorBlitOverlay = getBool("metalrender.compositor.blitOverlay", compositorBlitOverlay);
     aggressiveFrustumCulling = getBool("metalrender.culling.frustum", aggressiveFrustumCulling);
     occlusionCulling = getBool("metalrender.culling.occlusion", occlusionCulling);
     dynamicQuality = getBool("metalrender.dynamic.enable", dynamicQuality);

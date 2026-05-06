@@ -142,6 +142,7 @@ static id<MTLTexture> g_depth = nil;
 static id<MTLBuffer> g_depthReadBuffer = nil;
 static id<MTLCommandBuffer> g_depthCmdBuffer = nil;
 static id<MTLTexture> g_blockAtlas = nil;
+static id<MTLTexture> g_lightmap = nil;
 static IOSurfaceRef g_ioSurface = NULL;
 static id<MTLLibrary> g_shaderLibrary = nil;
 static int g_rtWidth = 16;
@@ -532,7 +533,93 @@ fragment float4 fragment_entity_emissive(
       dbg("FATAL: Terrain pipeline creation failed: %s\n",
           [[error localizedDescription] UTF8String]);
     }
-    g_pipelineOpaque = g_pipelineInhouse;
+    // Sodium 0.5 chunk-path pipelines: opaque / cutout / translucent built from
+    // vertex_terrain (20-byte SodiumVertex) + matching fragments. These are
+    // distinct from g_pipelineInhouse, which uses the legacy 14-byte InhouseTerrainVertex.
+    {
+      id<MTLFunction> sodiumVertFn =
+          [g_shaderLibrary newFunctionWithName:@"vertex_terrain"];
+      id<MTLFunction> sodiumFragFn =
+          [g_shaderLibrary newFunctionWithName:@"fragment_terrain"];
+      id<MTLFunction> sodiumFragCutoutFn =
+          [g_shaderLibrary newFunctionWithName:@"fragment_terrain_cutout"];
+      if (!sodiumVertFn || !sodiumFragFn || !sodiumFragCutoutFn) {
+        dbg("WARN: Sodium chunk shaders missing (vert=%p frag=%p cutout=%p) — "
+            "falling back g_pipelineOpaque to inhouse pipeline\n",
+            sodiumVertFn, sodiumFragFn, sodiumFragCutoutFn);
+        g_pipelineOpaque = g_pipelineInhouse;
+      } else {
+        // Opaque: no blending, depth write enabled.
+        MTLRenderPipelineDescriptor *opaqueDesc =
+            [[MTLRenderPipelineDescriptor alloc] init];
+        opaqueDesc.vertexFunction = sodiumVertFn;
+        opaqueDesc.fragmentFunction = sodiumFragFn;
+        opaqueDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        opaqueDesc.colorAttachments[0].blendingEnabled = NO;
+        opaqueDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        opaqueDesc.label = @"SodiumTerrainOpaque";
+        g_pipelineOpaque =
+            [g_device newRenderPipelineStateWithDescriptor:opaqueDesc
+                                                     error:&error];
+        if (!g_pipelineOpaque) {
+          dbg("FATAL: Sodium opaque terrain pipeline creation failed: %s\n",
+              error ? [[error localizedDescription] UTF8String] : "unknown");
+          g_pipelineOpaque = g_pipelineInhouse;
+        } else {
+          dbg("Sodium opaque terrain pipeline created OK\n");
+        }
+
+        // Cutout: alpha discard in fragment, no blending, depth write.
+        MTLRenderPipelineDescriptor *cutoutDesc =
+            [[MTLRenderPipelineDescriptor alloc] init];
+        cutoutDesc.vertexFunction = sodiumVertFn;
+        cutoutDesc.fragmentFunction = sodiumFragCutoutFn;
+        cutoutDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        cutoutDesc.colorAttachments[0].blendingEnabled = NO;
+        cutoutDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        cutoutDesc.label = @"SodiumTerrainCutout";
+        g_pipelineCutout =
+            [g_device newRenderPipelineStateWithDescriptor:cutoutDesc
+                                                     error:&error];
+        if (!g_pipelineCutout) {
+          dbg("FATAL: Sodium cutout terrain pipeline creation failed: %s\n",
+              error ? [[error localizedDescription] UTF8String] : "unknown");
+        } else {
+          dbg("Sodium cutout terrain pipeline created OK\n");
+        }
+
+        // Translucent: standard alpha blend, paired with g_depthStateLessEqual
+        // (no depth write) at draw time in nDrawChunkSection.
+        MTLRenderPipelineDescriptor *transDesc =
+            [[MTLRenderPipelineDescriptor alloc] init];
+        transDesc.vertexFunction = sodiumVertFn;
+        transDesc.fragmentFunction = sodiumFragFn;
+        transDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        transDesc.colorAttachments[0].blendingEnabled = YES;
+        transDesc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        transDesc.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+        transDesc.colorAttachments[0].sourceRGBBlendFactor =
+            MTLBlendFactorSourceAlpha;
+        transDesc.colorAttachments[0].destinationRGBBlendFactor =
+            MTLBlendFactorOneMinusSourceAlpha;
+        transDesc.colorAttachments[0].sourceAlphaBlendFactor =
+            MTLBlendFactorOne;
+        transDesc.colorAttachments[0].destinationAlphaBlendFactor =
+            MTLBlendFactorOneMinusSourceAlpha;
+        transDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        transDesc.label = @"SodiumTerrainTranslucent";
+        g_pipelineTranslucent =
+            [g_device newRenderPipelineStateWithDescriptor:transDesc
+                                                     error:&error];
+        if (!g_pipelineTranslucent) {
+          dbg("FATAL: Sodium translucent terrain pipeline creation failed: "
+              "%s\n",
+              error ? [[error localizedDescription] UTF8String] : "unknown");
+        } else {
+          dbg("Sodium translucent terrain pipeline created OK\n");
+        }
+      }
+    }
     id<MTLFunction> fragIcbFn =
         [g_shaderLibrary newFunctionWithName:@"fragment_terrain_icb"];
     if (vertexFn && fragIcbFn) {
@@ -765,6 +852,22 @@ fragment float4 fragment_entity_emissive(
                       withBytes:white
                     bytesPerRow:4];
     dbg("Created 1x1 white fallback atlas texture\n");
+  }
+  if (!g_lightmap) {
+    MTLTextureDescriptor *lmDesc = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                     width:1
+                                    height:1
+                                 mipmapped:NO];
+    lmDesc.usage = MTLTextureUsageShaderRead;
+    lmDesc.storageMode = MTLStorageModeShared;
+    g_lightmap = [g_device newTextureWithDescriptor:lmDesc];
+    uint8_t white[4] = {255, 255, 255, 255};
+    [g_lightmap replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                  mipmapLevel:0
+                    withBytes:white
+                  bytesPerRow:4];
+    dbg("Created 1x1 white fallback lightmap texture\n");
   }
   dbg("Shaders loaded: terrain inhouse=%p opaque=%p entity=%p "
       "entityTranslucent=%p entityEmissive=%p depth=%p\n",
@@ -2289,6 +2392,9 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetCurrentFrameCon
     if (g_blockAtlas) {
       [g_currentEncoder setFragmentTexture:g_blockAtlas atIndex:0];
     }
+    if (g_lightmap) {
+      [g_currentEncoder setFragmentTexture:g_lightmap atIndex:1];
+    }
     if (g_frameCount < 3) {
       dbg("Matrices at frame start:\n");
       dbg("  Proj: [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f "
@@ -2613,6 +2719,8 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nBindTexture(
       (__bridge id<MTLTexture>)(void *)(uintptr_t)textureHandle;
   if (slot == 0) {
     g_blockAtlas = tex;
+  } else if (slot == 1) {
+    g_lightmap = tex;
   }
   if (g_currentEncoder && tex) {
     [g_currentEncoder setFragmentTexture:tex atIndex:(NSUInteger)slot];

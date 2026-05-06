@@ -7,7 +7,7 @@
     "pebbles_boon"
   ],
   "name": "MetalRender",
-  "description": "Experimental Metal-based renderer for Minecraft on macOS. (1.20.1 stub backport — renderer hooks disabled)",
+  "description": "Experimental Metal-based renderer for Minecraft on macOS. (1.20.1 backport against Sodium 0.5.x)",
   "environment": "client",
   "entrypoints": {
     "client": [
