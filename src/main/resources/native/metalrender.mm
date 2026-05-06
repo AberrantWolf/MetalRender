@@ -2694,6 +2694,110 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetDefaultPipeline
   (void)handle;
   return (jlong)(uintptr_t)(__bridge void *)g_pipelineOpaque;
 }
+
+// --- Sodium 0.5 chunk path (added for the 1.20.1 backport) ------------------
+// passId: 0 = SOLID, 1 = CUTOUT, 2 = TRANSLUCENT
+// (matches DefaultTerrainRenderPasses ordering)
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetTerrainPipelineHandle(
+    JNIEnv *, jclass, jlong handle, jint pass) {
+  (void)handle;
+  id<MTLRenderPipelineState> p = nil;
+  switch (pass) {
+    case 0: p = g_pipelineOpaque;      break;
+    case 1: p = g_pipelineCutout;      break;
+    case 2: p = g_pipelineTranslucent; break;
+    default: return 0;
+  }
+  return (jlong)(uintptr_t)(__bridge void *)p;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nUploadChunkMesh(
+    JNIEnv *env, jclass, jlong deviceHandle, jobject vertexData,
+    jint vertexCount, jint formatId) {
+  (void)deviceHandle;
+  (void)formatId;
+  ensure_device();
+  if (!g_device || !vertexData || vertexCount <= 0)
+    return 0;
+  void *src = env->GetDirectBufferAddress(vertexData);
+  if (!src)
+    return 0;
+  jlong cap = env->GetDirectBufferCapacity(vertexData);
+  if (cap <= 0)
+    return 0;
+  size_t sizeBytes = (size_t)cap;
+  if (g_megaVB && sizeBytes <= 16 * 1024 * 1024) {
+    uint64_t megaH = megaAlloc(sizeBytes);
+    if (megaH != 0) {
+      void *dst = megaGetPointer(megaH);
+      if (dst) {
+        memcpy(dst, src, sizeBytes);
+        return (jlong)megaH;
+      }
+    }
+  }
+  id<MTLBuffer> buf = [g_device newBufferWithBytes:src
+                                            length:sizeBytes
+                                           options:MTLResourceStorageModeShared];
+  return (jlong)store_buffer(buf);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawChunkSection(
+    JNIEnv *, jclass, jlong frameContext, jlong vertexBuffer, jlong indexBuffer,
+    jint indexOffset, jint indexCount,
+    jfloat chunkOriginX, jfloat chunkOriginY, jfloat chunkOriginZ,
+    jint passId) {
+  (void)frameContext;
+  if (!g_currentEncoder || indexCount <= 0) {
+    g_drawSkipCount++;
+    return;
+  }
+  id<MTLRenderPipelineState> targetPipeline = nil;
+  switch (passId) {
+    case 0: targetPipeline = g_pipelineOpaque;      break;
+    case 1: targetPipeline = g_pipelineCutout;      break;
+    case 2: targetPipeline = g_pipelineTranslucent; break;
+    default: return;
+  }
+  if (!targetPipeline)
+    return;
+  if (g_currentPipeline != targetPipeline) {
+    [g_currentEncoder setRenderPipelineState:targetPipeline];
+    g_currentPipeline = targetPipeline;
+    id<MTLDepthStencilState> ds =
+        (passId == 2) ? g_depthStateLessEqual : g_depthState;
+    if (ds)
+      [g_currentEncoder setDepthStencilState:ds];
+  }
+  g_chunkOffsetX = chunkOriginX;
+  g_chunkOffsetY = chunkOriginY;
+  g_chunkOffsetZ = chunkOriginZ;
+  float offset[4] = {chunkOriginX, chunkOriginY, chunkOriginZ, 0.0f};
+  [g_currentEncoder setVertexBytes:offset length:sizeof(offset) atIndex:4];
+  ResolvedBuf vbRes = resolve_buffer((uint64_t)vertexBuffer);
+  ResolvedBuf ibRes = resolve_buffer((uint64_t)indexBuffer);
+  if (!vbRes.buf || !ibRes.buf)
+    return;
+  [g_currentEncoder setVertexBuffer:vbRes.buf
+                             offset:(NSUInteger)vbRes.offset
+                            atIndex:0];
+  [g_currentEncoder
+      drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                 indexCount:(NSUInteger)indexCount
+                  indexType:MTLIndexTypeUInt32
+                indexBuffer:ibRes.buf
+          indexBufferOffset:(NSUInteger)(ibRes.offset +
+                                         (size_t)indexOffset * sizeof(uint32_t))];
+  g_drawCallCount++;
+  g_totalDraws++;
+}
+
+// --- end Sodium 0.5 chunk path additions -----------------------------------
+
 extern "C" JNIEXPORT jint JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetGLTextureId(
     JNIEnv *, jclass, jlong handle) {

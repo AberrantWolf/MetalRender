@@ -132,4 +132,34 @@ public final class NativeBridge {
   public static native void nUnregisterChunkMesh(int cx, int cy, int cz);
   public static native int nDrawAllVisibleChunks(long frameContext,
       long indexBuffer);
+
+  // --- Sodium 0.5 chunk path (added for the 1.20.1 backport) -----------------
+  // pass: 0 = SOLID, 1 = CUTOUT, 2 = TRANSLUCENT
+  // (matches DefaultTerrainRenderPasses ordering)
+
+  /** Returns the MTLRenderPipelineState handle for the given terrain pass. */
+  public static native long nGetTerrainPipelineHandle(long handle, int pass);
+
+  /**
+   * Fused create-and-upload for a chunk vertex buffer. Avoids the
+   * nCreateBuffer + nUploadBufferDataDirect round-trip when the caller
+   * already has a fully-built mesh in a direct ByteBuffer.
+   *
+   * formatId is reserved for future Sodium-vertex-format selection;
+   * currently only the compact 20-byte format is supported.
+   */
+  public static native long nUploadChunkMesh(long deviceHandle,
+      java.nio.ByteBuffer vertexData, int vertexCount, int formatId);
+
+  /**
+   * Single-call render of one chunk section: binds the per-pass pipeline,
+   * sets the chunk-origin uniform, and issues the indexed draw. Replaces
+   * the per-section nSetPipelineState + nSetChunkOffset + nDrawIndexedBuffer
+   * trio with one JNI hop.
+   */
+  public static native void nDrawChunkSection(long frameContext,
+      long vertexBuffer, long indexBuffer,
+      int indexOffset, int indexCount,
+      float chunkOriginX, float chunkOriginY, float chunkOriginZ,
+      int passId);
 }
