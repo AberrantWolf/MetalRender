@@ -45,12 +45,6 @@ public final class MetalChunkRenderer implements ChunkRenderer {
   private int diagInvocations = 0;
   private static final int LOG_EVERY_N = 360; // ~ every 2s @ 60fps × 3 passes
 
-  // Fog diagnostic — log the first few SOLID-pass values plus periodic samples
-  // so it's easy to verify nUploadFogParams is receiving live values.
-  private int fogLogsRemaining = 5;
-  private int fogSampleCountdown = 0;
-  private static final int FOG_SAMPLE_INTERVAL = 600; // ~10s @ 60fps
-
   public MetalChunkRenderer() {
     MetalLogger.info("MetalChunkRenderer installed (Sodium 0.5 chunk path)");
   }
@@ -74,23 +68,12 @@ public final class MetalChunkRenderer implements ChunkRenderer {
     // sufficient because the values don't change between SOLID/CUTOUT/
     // TRANSLUCENT passes (FOG_TERRAIN is set once before chunk dispatch).
     if (passId == 0) {
-      float fogStart = RenderSystem.getShaderFogStart();
-      float fogEnd = RenderSystem.getShaderFogEnd();
       float[] fc = RenderSystem.getShaderFogColor();
       int fogShape = (RenderSystem.getShaderFogShape() == FogShape.CYLINDER) ? 1 : 0;
       NativeBridge.nUploadFogParams(handle, fc[0], fc[1], fc[2], 1.0f,
-                                    fogStart, fogEnd, fogShape);
-      if (fogLogsRemaining > 0) {
-        MetalLogger.info("Fog: start=%.2f end=%.2f color=(%.2f,%.2f,%.2f) shape=%s",
-            fogStart, fogEnd, fc[0], fc[1], fc[2],
-            fogShape == 1 ? "CYLINDER" : "SPHERE");
-        fogLogsRemaining--;
-      } else if (--fogSampleCountdown <= 0) {
-        MetalLogger.info("Fog (sample): start=%.2f end=%.2f color=(%.2f,%.2f,%.2f) shape=%s",
-            fogStart, fogEnd, fc[0], fc[1], fc[2],
-            fogShape == 1 ? "CYLINDER" : "SPHERE");
-        fogSampleCountdown = FOG_SAMPLE_INTERVAL;
-      }
+                                    RenderSystem.getShaderFogStart(),
+                                    RenderSystem.getShaderFogEnd(),
+                                    fogShape);
     }
 
     int sectionsDrawn = 0;
