@@ -1,5 +1,6 @@
 package com.pebbles_boon.metalrender.sodium;
 
+import com.mojang.blaze3d.platform.GlStateManager;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.nativebridge.NativeBridge;
 import com.pebbles_boon.metalrender.util.MetalLogger;
@@ -280,13 +281,17 @@ public final class MetalCompositor {
     int fbHeight = mainFb.textureHeight;
     if (fbWidth <= 0 || fbHeight <= 0) return;
 
-    // Save GL state
+    // Save GL state. Use GlStateManager for active-texture switches so MC's
+    // cached state stays consistent with the hardware — otherwise later
+    // GlStateManager._activeTexture calls in the blit body can become no-ops
+    // (cache says we're already on the requested slot) while the hardware is
+    // actually on a different slot, and bindings end up on the wrong unit.
     int savedProgram = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
     int savedVao = GL11.glGetInteger(GL30.GL_VERTEX_ARRAY_BINDING);
     int savedActiveTex = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
-    GL13.glActiveTexture(GL13.GL_TEXTURE0);
+    GlStateManager._activeTexture(GL13.GL_TEXTURE0);
     int savedTex0 = GL11.glGetInteger(GL31.GL_TEXTURE_BINDING_RECTANGLE);
-    GL13.glActiveTexture(GL13.GL_TEXTURE1);
+    GlStateManager._activeTexture(GL13.GL_TEXTURE1);
     int savedTex1 = GL11.glGetInteger(GL31.GL_TEXTURE_BINDING_RECTANGLE);
     int savedDrawFb = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
     boolean savedDepthTest = GL11.glIsEnabled(GL11.GL_DEPTH_TEST);
@@ -304,35 +309,43 @@ public final class MetalCompositor {
 
     try {
       mainFb.beginWrite(false);
-      GL11.glViewport(0, 0, fbWidth, fbHeight);
-      GL11.glDisable(GL11.GL_CULL_FACE);
-      GL11.glDisable(GL11.GL_SCISSOR_TEST);
+      // Route every state change through GlStateManager so MC's cached
+      // GL state matches the hardware. Bypassing GlStateManager (with raw
+      // GL11.* calls) leaves its cache stale, causing later RenderSystem
+      // calls in vanilla code (e.g. depthMask(false) before particles) to
+      // be no-ops because the cache thinks the value is already correct.
+      GlStateManager._viewport(0, 0, fbWidth, fbHeight);
+      GlStateManager._disableCull();
+      GlStateManager._disableScissorTest();
       if (writeDepth) {
         // Want to overwrite MC depth where Metal terrain was rendered.
         // GL_ALWAYS makes the depth test always pass; depth write is on so
         // gl_FragDepth gets stored.
-        GL11.glEnable(GL11.GL_DEPTH_TEST);
-        GL11.glDepthFunc(GL11.GL_ALWAYS);
-        GL11.glDepthMask(true);
+        GlStateManager._enableDepthTest();
+        GlStateManager._depthFunc(GL11.GL_ALWAYS);
+        GlStateManager._depthMask(true);
       } else {
-        GL11.glDisable(GL11.GL_DEPTH_TEST);
-        GL11.glDepthMask(false);
+        GlStateManager._disableDepthTest();
+        GlStateManager._depthMask(false);
       }
       if (alphaBlend) {
-        GL11.glEnable(GL11.GL_BLEND);
-        GL14.glBlendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA,
-                                 GL11.GL_ONE,        GL11.GL_ONE_MINUS_SRC_ALPHA);
+        GlStateManager._enableBlend();
+        GlStateManager._blendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA,
+                                          GL11.GL_ONE,        GL11.GL_ONE_MINUS_SRC_ALPHA);
       } else {
         // Chunks fully overwrite vanilla output where they exist.
-        GL11.glDisable(GL11.GL_BLEND);
+        GlStateManager._disableBlend();
       }
 
-      GL20.glUseProgram(program);
-      GL13.glActiveTexture(GL13.GL_TEXTURE0);
+      GlStateManager._glUseProgram(program);
+      GlStateManager._activeTexture(GL13.GL_TEXTURE0);
+      // GlStateManager has no rect-texture binding tracker — it tracks
+      // GL_TEXTURE_2D only. Use raw GL for these (won't cache-poison since
+      // they're a different texture target).
       GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, glRectTexture);
       GL20.glUniform1i(uTextureLoc, 0);
       if (writeDepth) {
-        GL13.glActiveTexture(GL13.GL_TEXTURE1);
+        GlStateManager._activeTexture(GL13.GL_TEXTURE1);
         GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, glDepthRectTexture);
         GL20.glUniform1i(uDepthLoc, 1);
       }
@@ -360,22 +373,23 @@ public final class MetalCompositor {
       }
     } finally {
       GL30.glBindVertexArray(savedVao);
-      GL13.glActiveTexture(GL13.GL_TEXTURE1);
+      GlStateManager._activeTexture(GL13.GL_TEXTURE1);
       GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, savedTex1);
-      GL13.glActiveTexture(GL13.GL_TEXTURE0);
+      GlStateManager._activeTexture(GL13.GL_TEXTURE0);
       GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, savedTex0);
-      GL13.glActiveTexture(savedActiveTex);
-      GL20.glUseProgram(savedProgram);
+      GlStateManager._activeTexture(savedActiveTex);
+      GlStateManager._glUseProgram(savedProgram);
       GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, savedDrawFb);
-      GL11.glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
+      GlStateManager._viewport(savedViewport[0], savedViewport[1],
+                               savedViewport[2], savedViewport[3]);
       setEnabled(GL11.GL_DEPTH_TEST, savedDepthTest);
       setEnabled(GL11.GL_BLEND, savedBlend);
       setEnabled(GL11.GL_CULL_FACE, savedCullFace);
       setEnabled(GL11.GL_SCISSOR_TEST, savedScissor);
-      GL11.glDepthMask(savedDepthMask);
-      GL11.glDepthFunc(savedDepthFunc);
-      GL14.glBlendFuncSeparate(savedBlendSrcRgb, savedBlendDstRgb,
-                               savedBlendSrcAlpha, savedBlendDstAlpha);
+      GlStateManager._depthMask(savedDepthMask);
+      GlStateManager._depthFunc(savedDepthFunc);
+      GlStateManager._blendFuncSeparate(savedBlendSrcRgb, savedBlendDstRgb,
+                                        savedBlendSrcAlpha, savedBlendDstAlpha);
     }
 
     blitFrames++;
@@ -386,7 +400,19 @@ public final class MetalCompositor {
   }
 
   private static void setEnabled(int cap, boolean enabled) {
-    if (enabled) GL11.glEnable(cap); else GL11.glDisable(cap);
+    // GlStateManager tracks each capability individually; route through it
+    // so MC's cached state matches hardware.
+    if (cap == GL11.GL_DEPTH_TEST) {
+      if (enabled) GlStateManager._enableDepthTest(); else GlStateManager._disableDepthTest();
+    } else if (cap == GL11.GL_BLEND) {
+      if (enabled) GlStateManager._enableBlend(); else GlStateManager._disableBlend();
+    } else if (cap == GL11.GL_CULL_FACE) {
+      if (enabled) GlStateManager._enableCull(); else GlStateManager._disableCull();
+    } else if (cap == GL11.GL_SCISSOR_TEST) {
+      if (enabled) GlStateManager._enableScissorTest(); else GlStateManager._disableScissorTest();
+    } else {
+      if (enabled) GL11.glEnable(cap); else GL11.glDisable(cap);
+    }
   }
 
   public static void destroy() {
