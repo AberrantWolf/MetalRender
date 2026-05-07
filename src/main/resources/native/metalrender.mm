@@ -1302,6 +1302,17 @@ static id<MTLRenderPipelineState> g_currentPipeline = nil;
 static float g_chunkOffsetX = 0, g_chunkOffsetY = 0, g_chunkOffsetZ = 0;
 static float g_projMatrix[16] = {};
 static float g_mvMatrix[16] = {};
+// Fog parameters mirrored from MC's RenderSystem fog state. Kept as a single
+// 32-byte struct so it fits cleanly into setVertexBytes/setFragmentBytes.
+// Layout MUST match the FogParams struct in metalrender.metal exactly.
+struct FogParams {
+  float color[4];      // rgba — alpha is intensity scalar (1.0 = fog active)
+  float start;
+  float end;
+  int   shape;         // 0 = sphere (default), 1 = cylinder (used underwater on 1.20.1)
+  int   _pad;
+};
+static FogParams g_fogParams = { {1, 1, 1, 0}, 0.0f, 1.0f, 0, 0 };
 static double g_camX = 0, g_camY = 0, g_camZ = 0;
 id<MTLRenderCommandEncoder> g_currentEncoder = nil;
 static id<MTLCommandBuffer> g_currentCmdBuffer = nil;
@@ -2948,6 +2959,13 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawChunkSection(
   g_chunkOffsetZ = chunkOriginZ;
   float offset[4] = {chunkOriginX, chunkOriginY, chunkOriginZ, 0.0f};
   [g_currentEncoder setVertexBytes:offset length:sizeof(offset) atIndex:4];
+  // Fog params are tiny (32 bytes) and cheap to push every draw. The vertex
+  // shader uses start/end/shape to compute fogFactor; the fragment uses color
+  // to lerp. setFragmentBytes is a no-op cost-wise on Apple GPUs at this size.
+  [g_currentEncoder setVertexBytes:&g_fogParams
+                            length:sizeof(g_fogParams) atIndex:5];
+  [g_currentEncoder setFragmentBytes:&g_fogParams
+                              length:sizeof(g_fogParams) atIndex:0];
   ResolvedBuf vbRes = resolve_buffer((uint64_t)vertexBuffer);
   ResolvedBuf ibRes = resolve_buffer((uint64_t)indexBuffer);
   if (!vbRes.buf || !ibRes.buf)
@@ -3029,6 +3047,25 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nBindDepthIOSurface
   uint64_t _t1 = mach_absolute_time();
   g_prof_cglBind_acc += (_t1 - _t0);
   return (err == kCGLNoError) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Per-frame fog params upload from the Java side. Reads MC's RenderSystem
+// fog state (color, start, end, shape) and stores it for the next chunk
+// draws. Color alpha doubles as the "fog enabled" scalar (0 disables fog
+// entirely — useful for debug A/B compares without rebuilding the shader).
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nUploadFogParams(
+    JNIEnv *, jclass, jlong handle,
+    jfloat r, jfloat g, jfloat b, jfloat a,
+    jfloat fogStart, jfloat fogEnd, jint shape) {
+  (void)handle;
+  g_fogParams.color[0] = (float)r;
+  g_fogParams.color[1] = (float)g;
+  g_fogParams.color[2] = (float)b;
+  g_fogParams.color[3] = (float)a;
+  g_fogParams.start = (float)fogStart;
+  g_fogParams.end = (float)fogEnd;
+  g_fogParams.shape = (int)shape;
 }
 
 // --- end Sodium 0.5 chunk path additions -----------------------------------

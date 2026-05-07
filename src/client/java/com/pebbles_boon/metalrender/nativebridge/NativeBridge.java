@@ -178,4 +178,18 @@ public final class NativeBridge {
    * Mirrors {@link #nBindIOSurfaceToTexture} but for the depth attachment.
    */
   public static native boolean nBindDepthIOSurfaceToTexture(long handle, int glTexture);
+
+  /**
+   * Pushes MC's {@code RenderSystem} fog state into the Sodium chunk path's
+   * fog uniform. Distance fog is computed in {@code vertex_terrain} from
+   * {@code (start, end, shape)} and applied via lerp toward {@code rgb} in
+   * {@code fragment_terrain_chunk*}. Pass {@code a=0} to disable fog
+   * entirely (handy for debug A/B compares).
+   *
+   * <p>{@code shape}: {@code 0 = sphere} (radial distance), {@code 1 = cylinder}
+   * (horizontal-only — what 1.20.1 uses underwater).
+   */
+  public static native void nUploadFogParams(long handle,
+      float r, float g, float b, float a,
+      float fogStart, float fogEnd, int shape);
 }

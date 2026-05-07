@@ -5,6 +5,7 @@ import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.nativebridge.NativeBridge;
 import com.pebbles_boon.metalrender.sodium.MetalTextureBridge;
 import net.minecraft.client.render.Camera;
+import net.minecraft.client.render.FogShape;
 import net.minecraft.client.render.GameRenderer;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.WorldRenderer;
@@ -64,6 +65,16 @@ public abstract class WorldRendererMixin {
     float fogStart = RenderSystem.getShaderFogStart();
     float fogEnd = RenderSystem.getShaderFogEnd();
     NativeBridge.nBeginFrame(handle, metalrender$projTmp, metalrender$mvTmp, fogStart, fogEnd);
+    // Color + shape can't go through nBeginFrame (its signature predates the
+    // chunk path); push them via nUploadFogParams so the chunk shader can
+    // tint the fog correctly per dimension (overworld blue, nether red,
+    // underwater blue-tint, etc.) and pick the right distance metric
+    // (CYLINDER for underwater so the column above isn't fogged out).
+    float[] fogColor = RenderSystem.getShaderFogColor();
+    int fogShape = (RenderSystem.getShaderFogShape() == FogShape.CYLINDER) ? 1 : 0;
+    NativeBridge.nUploadFogParams(handle,
+        fogColor[0], fogColor[1], fogColor[2], 1.0f,
+        fogStart, fogEnd, fogShape);
 
     // Mirror MC's block atlas (one-time) + lightmap (per-frame) into Metal so
     // the chunk fragment shader has real textures and lighting.

@@ -64,6 +64,18 @@ struct SimpleVertexOut {
     float2 lightUV;
     half  light;
     uint   normalIndex [[flat]];
+    // 0 = full fog, 1 = no fog. Vertex computes from view-space distance and
+    // FogParams.{start,end,shape}; fragment lerps texColor toward FogParams.color.
+    half   fogFactor;
+};
+
+// MUST match the FogParams C++ struct in metalrender.mm byte-for-byte.
+struct FogParams {
+    float4 color;   // .a doubles as fog-enabled scalar (0 = off, 1 = on)
+    float  start;
+    float  end;
+    int    shape;   // 0 = sphere, 1 = cylinder (radial vs horizontal distance)
+    int    _pad;
 };
 
 static inline half3 applyUnderwaterFog(half3 rgb, half fogDist, constant float4& overlayParams) {
@@ -81,6 +93,7 @@ vertex SimpleVertexOut vertex_terrain(
     constant float4x4& modelViewMatrix        [[buffer(2)]],
     constant float4& cameraPosition           [[buffer(3)]],
     constant float4& chunkOffset              [[buffer(4)]],
+    constant FogParams& fog                   [[buffer(5)]],
     uint vid [[vertex_id]]
 ) {
     SodiumVertex v = vertices[vid];
@@ -89,6 +102,17 @@ vertex SimpleVertexOut vertex_terrain(
     float3 worldPos = localPos + chunkOffset.xyz;
     float4 viewPos = modelViewMatrix * float4(worldPos, 1.0);
     out.position = projectionMatrix * viewPos;
+    // View-space distance from camera. Sphere = radial, cylinder = horizontal
+    // (used by 1.20.1 underwater fog so the vertical column doesn't get fogged
+    // out at the surface). FogParams is camera-relative so viewPos.xyz is the
+    // distance vector.
+    float dist = (fog.shape == 1)
+        ? length(viewPos.xz)
+        : length(viewPos.xyz);
+    float range = max(fog.end - fog.start, 1e-3);
+    float linearFactor = saturate((fog.end - dist) / range);
+    // color.a == 0 disables fog (factor stays 1.0 so no blending toward color).
+    out.fogFactor = half(mix(1.0f, linearFactor, fog.color.a));
     // MC projection is GL-style (clip-space z in [-w, w]); Metal expects
     // D3D-style [0, w]. Remap so the rasterizer-written depth values match
     // GL's window-space depth and entities/clouds rendered by vanilla GL on
@@ -117,7 +141,8 @@ struct ChunkFragOut {
 fragment ChunkFragOut fragment_terrain_chunk(
     SimpleVertexOut in [[stage_in]],
     texture2d<half> blockAtlas  [[texture(0)]],
-    texture2d<half> lightmap    [[texture(1)]]
+    texture2d<half> lightmap    [[texture(1)]],
+    constant FogParams& fog     [[buffer(0)]]
 ) {
     // Block atlas: nearest, for crisp pixel art.
     constexpr sampler atlasSampler(mag_filter::nearest, min_filter::nearest, mip_filter::nearest);
@@ -134,6 +159,10 @@ fragment ChunkFragOut fragment_terrain_chunk(
     half shade = in.color.a;
     half3 light = lightmap.sample(lightSampler, in.lightUV).rgb;
     half3 finalRgb = texColor.rgb * tint * shade * light;
+    // Linear fog blend toward fog.color. Translucent surfaces keep their
+    // alpha — only rgb fades, so the blend produces a haze rather than
+    // solidifying glass at distance.
+    finalRgb = mix(half3(fog.color.rgb), finalRgb, in.fogFactor);
     ChunkFragOut out;
     out.color = half4(finalRgb, texColor.a);
     // in.position.z is post-rasterization window-space depth in [0..1]; the
@@ -146,7 +175,8 @@ fragment ChunkFragOut fragment_terrain_chunk(
 fragment ChunkFragOut fragment_terrain_chunk_cutout(
     SimpleVertexOut in [[stage_in]],
     texture2d<half> blockAtlas  [[texture(0)]],
-    texture2d<half> lightmap    [[texture(1)]]
+    texture2d<half> lightmap    [[texture(1)]],
+    constant FogParams& fog     [[buffer(0)]]
 ) {
     constexpr sampler atlasSampler(mag_filter::nearest, min_filter::nearest, mip_filter::nearest);
     constexpr sampler lightSampler(mag_filter::linear, min_filter::linear);
@@ -156,6 +186,7 @@ fragment ChunkFragOut fragment_terrain_chunk_cutout(
     half shade = in.color.a;
     half3 light = lightmap.sample(lightSampler, in.lightUV).rgb;
     half3 finalRgb = texColor.rgb * tint * shade * light;
+    finalRgb = mix(half3(fog.color.rgb), finalRgb, in.fogFactor);
     ChunkFragOut out;
     out.color = half4(finalRgb, half(1.0));
     out.depth = in.position.z;
@@ -229,6 +260,7 @@ vertex SimpleVertexOut vertex_terrain_inhouse(
             out.lightUV  = float2(0.0f);
             out.light    = 0.0h;
             out.normalIndex = 1;
+            out.fogFactor = 1.0h;
             return out;
         }
     }
@@ -245,6 +277,9 @@ vertex SimpleVertexOut vertex_terrain_inhouse(
     out.light = half(max(max(out.lightUV.x,
                              out.lightUV.y * cameraPosition.w), 0.15f));
     out.normalIndex = uint(v.normalIndex & 0x7);
+    // Inhouse legacy path doesn't bind fog params; leave fogFactor at 1.0
+    // (no blend toward fog color) so the chunk fragment shader is a no-op.
+    out.fogFactor = 1.0h;
     return out;
 }
 
