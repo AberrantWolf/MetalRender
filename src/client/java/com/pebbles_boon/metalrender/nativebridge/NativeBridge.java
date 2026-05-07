@@ -162,4 +162,20 @@ public final class NativeBridge {
       int indexOffset, int indexCount,
       float chunkOriginX, float chunkOriginY, float chunkOriginZ,
       int passId);
+
+  /**
+   * Mid-frame commit: ends the current chunk encoder and commits the command
+   * buffer so the IOSurface (color + depth-mirror) is visible to GL for blit.
+   * After this call, the next nGetCurrentFrameContext starts a fresh encoder
+   * that LOADs the existing IOSurface contents (so subsequent passes draw on
+   * top instead of clearing).
+   */
+  public static native void nFlushChunkPasses(long handle);
+
+  /**
+   * Binds the R32Float depth-mirror IOSurface to the given GL_TEXTURE_RECTANGLE
+   * texture via {@code CGLTexImageIOSurface2D}. Returns true on success.
+   * Mirrors {@link #nBindIOSurfaceToTexture} but for the depth attachment.
+   */
+  public static native boolean nBindDepthIOSurfaceToTexture(long handle, int glTexture);
 }

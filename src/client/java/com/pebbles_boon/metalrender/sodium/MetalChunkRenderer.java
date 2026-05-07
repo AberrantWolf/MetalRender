@@ -1,8 +1,10 @@
 package com.pebbles_boon.metalrender.sodium;
 
 import com.pebbles_boon.metalrender.MetalRenderClient;
+import com.pebbles_boon.metalrender.config.MetalRenderConfig;
 import com.pebbles_boon.metalrender.nativebridge.NativeBridge;
 import com.pebbles_boon.metalrender.util.MetalLogger;
+import net.minecraft.client.MinecraftClient;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import me.jellysquid.mods.sodium.client.gl.device.CommandList;
@@ -94,6 +96,29 @@ public final class MetalChunkRenderer implements ChunkRenderer {
           diagDrawsAcc, diagInvocations, meshes.size());
       diagDrawsAcc = 0;
       diagInvocations = 0;
+    }
+
+    // Stage-2 composite: after CUTOUT, blit color + depth to MC's framebuffer
+    // so vanilla GL passes (entities, particles) z-test against Metal terrain.
+    // After TRANSLUCENT, alpha-blend the new translucent fragments only — do
+    // NOT re-blit the loaded cutout content (that would overwrite the entity
+    // layer GL just drew between blits).
+    //
+    // Order in MC 1.20.1's WorldRenderer.render:
+    //   SOLID         → render(passId=0)                    (defer blit)
+    //   CUTOUT        → render(passId=1) → flushAndBlit     (overwrite + depth)
+    //   entities, block entities                             (z-test against terrain)
+    //   TRANSLUCENT   → render(passId=2) → flushAndBlitTransl (alpha-blend, no depth)
+    //   particles, weather, debug
+    if (MetalRenderConfig.compositorBlitOverlay()) {
+      MinecraftClient mc = MinecraftClient.getInstance();
+      if (mc != null && mc.getFramebuffer() != null) {
+        if (passId == 1) {
+          MetalCompositor.get().flushAndBlit(mc.getFramebuffer());
+        } else if (passId == 2) {
+          MetalCompositor.get().flushAndBlitTranslucent(mc.getFramebuffer());
+        }
+      }
     }
   }
 

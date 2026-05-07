@@ -17,30 +17,25 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /**
- * Stage-1 diagnostic compositor. Blits the IOSurface-backed Metal output onto
- * Minecraft's main framebuffer with a fullscreen triangle and a tiny shader
- * sampling via {@code sampler2DRect}.
+ * Composites the IOSurface-backed Metal output (color + depth) onto
+ * Minecraft's main framebuffer with a fullscreen triangle and a small shader
+ * sampling via {@code sampler2DRect} for both color and depth.
  *
- * <p>Sodium GL chunk render still runs; this overlay is layered on top with
- * standard alpha blend. Identical-on-identical-scene confirms the Metal
- * pipeline is producing valid pixels. Stages CB/CC will replace, not overlay.
+ * <p>Stage-2 mode (called via {@link #flushAndBlit}): committed mid-frame after
+ * Sodium's CUTOUT pass — Metal terrain depth is written into MC's depth buffer
+ * via {@code gl_FragDepth} so subsequent vanilla GL passes (entities, particles)
+ * z-test correctly against Metal-rendered terrain. A second flush+blit happens
+ * after TRANSLUCENT to layer water/glass on top.
  *
- * <p>Native side wiring is already in place:
- * <ul>
- * <li>{@code g_color} is an IOSurface-backed Metal texture
- *     ({@code metalrender.mm:891})</li>
- * <li>{@code nBindIOSurfaceToTexture} performs
- *     {@code CGLTexImageIOSurface2D} into a GL_TEXTURE_RECTANGLE_ARB target
- *     ({@code metalrender.mm:2922})</li>
- * <li>{@code nWaitForRender} blocks until Metal frame is committed
- *     ({@code metalrender.mm:2912})</li>
- * </ul>
+ * <p>Stage-1 mode (called via {@link #blitOverlay}): end-of-frame overlay
+ * without depth, kept for diagnostic A/B testing.
  */
 public final class MetalCompositor {
   private static volatile MetalCompositor instance;
 
   // GL resource handles (0 = unallocated)
-  private int glRectTexture = 0;
+  private int glRectTexture = 0;       // color rectangle (BGRA from g_ioSurface)
+  private int glDepthRectTexture = 0;  // depth rectangle (R32F from g_depthMirrorIOSurface)
   private int program = 0;
   private int vao = 0;
   private int vbo = 0;
@@ -48,11 +43,15 @@ public final class MetalCompositor {
   // Cached GL locations
   private int aPosLoc = -1;
   private int uTextureLoc = -1;
+  private int uDepthLoc = -1;
   private int uViewportLoc = -1;
+  private int uWriteDepthLoc = -1;
+  private int uPreserveAlphaLoc = -1;
 
   // Last bind dimensions (rebind when these change)
   private int boundWidth = 0;
   private int boundHeight = 0;
+  private boolean depthBound = false;
 
   // Diagnostic counters
   private int blitFrames = 0;
@@ -77,8 +76,7 @@ public final class MetalCompositor {
       "uniform vec2 uViewport;\n" +
       "void main() {\n" +
       "  gl_Position = vec4(aPos, 0.0, 1.0);\n" +
-      // Metal writes textures top-down; GL samples bottom-up. Flip V so the
-      // composite is right-side up. X is unaffected.
+      // Metal writes textures top-down; GL samples bottom-up. Flip V.
       "  vTexCoord = vec2((aPos.x * 0.5 + 0.5) * uViewport.x,\n" +
       "                   (1.0 - (aPos.y * 0.5 + 0.5)) * uViewport.y);\n" +
       "}\n";
@@ -88,10 +86,21 @@ public final class MetalCompositor {
       "in vec2 vTexCoord;\n" +
       "out vec4 fragColor;\n" +
       "uniform sampler2DRect uTexture;\n" +
+      "uniform sampler2DRect uDepth;\n" +
+      "uniform int uWriteDepth;\n" +
+      "uniform int uPreserveAlpha;\n" +
       "void main() {\n" +
       "  vec4 c = texture(uTexture, vTexCoord);\n" +
+      // Discard transparent pixels so vanilla GL output (sky, gaps) shows
+      // through — and crucially also so we don't write depth where Metal
+      // didn't render any chunk pixel.
       "  if (c.a < 0.001) discard;\n" +
-      "  fragColor = vec4(c.rgb, 1.0);\n" +
+      "  fragColor = (uPreserveAlpha != 0) ? c : vec4(c.rgb, 1.0);\n" +
+      "  if (uWriteDepth != 0) {\n" +
+      "    gl_FragDepth = texture(uDepth, vTexCoord).r;\n" +
+      "  } else {\n" +
+      "    gl_FragDepth = gl_FragCoord.z;\n" +
+      "  }\n" +
       "}\n";
 
   private boolean ensureInit() {
@@ -117,11 +126,11 @@ public final class MetalCompositor {
     }
     aPosLoc = GL20.glGetAttribLocation(prog, "aPos");
     uTextureLoc = GL20.glGetUniformLocation(prog, "uTexture");
+    uDepthLoc = GL20.glGetUniformLocation(prog, "uDepth");
     uViewportLoc = GL20.glGetUniformLocation(prog, "uViewport");
+    uWriteDepthLoc = GL20.glGetUniformLocation(prog, "uWriteDepth");
+    uPreserveAlphaLoc = GL20.glGetUniformLocation(prog, "uPreserveAlpha");
 
-    // Fullscreen triangle: clip-space verts (-1,-1), (3,-1), (-1,3) — covers the
-    // viewport with one triangle (the triangle extends beyond NDC bounds; the
-    // GPU clips, no fragment is wasted).
     ByteBuffer verts = MemoryUtil.memAlloc(3 * 2 * 4).order(ByteOrder.nativeOrder());
     try {
       verts.putFloat(-1.0f).putFloat(-1.0f);
@@ -143,17 +152,23 @@ public final class MetalCompositor {
     }
 
     glRectTexture = GL11.glGenTextures();
-    GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, glRectTexture);
+    initRectTexture(glRectTexture);
+    glDepthRectTexture = GL11.glGenTextures();
+    initRectTexture(glDepthRectTexture);
+
+    program = prog;
+    MetalLogger.info("MetalCompositor: GL program ready (program=%d vao=%d vbo=%d color=%d depth=%d)",
+        program, vao, vbo, glRectTexture, glDepthRectTexture);
+    return true;
+  }
+
+  private static void initRectTexture(int tex) {
+    GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, tex);
     GL11.glTexParameteri(GL31.GL_TEXTURE_RECTANGLE, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
     GL11.glTexParameteri(GL31.GL_TEXTURE_RECTANGLE, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
     GL11.glTexParameteri(GL31.GL_TEXTURE_RECTANGLE, GL11.GL_TEXTURE_WRAP_S, GL13.GL_CLAMP_TO_EDGE);
     GL11.glTexParameteri(GL31.GL_TEXTURE_RECTANGLE, GL11.GL_TEXTURE_WRAP_T, GL13.GL_CLAMP_TO_EDGE);
     GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, 0);
-
-    program = prog;
-    MetalLogger.info("MetalCompositor: GL program ready (program=%d vao=%d vbo=%d tex=%d)",
-        program, vao, vbo, glRectTexture);
-    return true;
   }
 
   private static int compileShader(int type, String source, String label) {
@@ -169,40 +184,92 @@ public final class MetalCompositor {
     return id;
   }
 
-  private boolean ensureBound() {
+  private boolean ensureBound(boolean needDepth) {
     long handle = MetalRenderClient.getHandle();
     if (handle == 0L) return false;
     int wantW = NativeBridge.nGetIOSurfaceWidth(handle);
     int wantH = NativeBridge.nGetIOSurfaceHeight(handle);
     if (wantW <= 0 || wantH <= 0) return false;
-    if (wantW == boundWidth && wantH == boundHeight && glRectTexture != 0) return true;
-    boolean ok = NativeBridge.nBindIOSurfaceToTexture(handle, glRectTexture);
-    if (!ok) {
-      MetalLogger.warn("MetalCompositor: nBindIOSurfaceToTexture failed (tex=%d %dx%d)",
-          glRectTexture, wantW, wantH);
-      return false;
+    boolean dimsChanged = (wantW != boundWidth || wantH != boundHeight);
+    if (dimsChanged || glRectTexture == 0) {
+      if (!NativeBridge.nBindIOSurfaceToTexture(handle, glRectTexture)) {
+        MetalLogger.warn("MetalCompositor: nBindIOSurfaceToTexture failed (tex=%d %dx%d)",
+            glRectTexture, wantW, wantH);
+        return false;
+      }
     }
-    boundWidth = wantW;
-    boundHeight = wantH;
-    MetalLogger.info("MetalCompositor: bound IOSurface to GL texture (%dx%d)", wantW, wantH);
+    if (needDepth && (dimsChanged || !depthBound)) {
+      if (NativeBridge.nBindDepthIOSurfaceToTexture(handle, glDepthRectTexture)) {
+        depthBound = true;
+        MetalLogger.info("MetalCompositor: bound depth IOSurface to GL texture (%dx%d)",
+            wantW, wantH);
+      } else {
+        depthBound = false;
+        MetalLogger.warn("MetalCompositor: nBindDepthIOSurfaceToTexture failed (tex=%d)",
+            glDepthRectTexture);
+      }
+    }
+    if (dimsChanged) {
+      boundWidth = wantW;
+      boundHeight = wantH;
+      MetalLogger.info("MetalCompositor: bound color IOSurface to GL texture (%dx%d)",
+          wantW, wantH);
+    }
     return true;
   }
 
   /**
-   * Per-frame entry point. Called from {@code WorldRendererBlitMixin}
-   * {@code @At("RETURN")}. Blits the Metal output as an alpha-blended overlay
-   * onto the supplied framebuffer (typically MC's main framebuffer).
+   * Stage-1 entry point: end-of-frame overlay blit, no depth write. Kept for
+   * the diagnostic flag path (compositor.blitOverlay).
    */
   public void blitOverlay(Framebuffer mainFb) {
+    blit(mainFb, /*writeDepth=*/false, /*flushFirst=*/true,
+        /*alphaBlend=*/true);
+  }
+
+  /**
+   * Stage-2 entry point: mid-frame Metal commit + composite blit with depth.
+   * Called from {@code MetalChunkRenderer.render} after the CUTOUT pass.
+   * Overwrites color and depth at every chunk pixel — vanilla GL passes that
+   * follow (entities, particles) z-test against the populated depth buffer.
+   */
+  public void flushAndBlit(Framebuffer mainFb) {
+    blit(mainFb, /*writeDepth=*/true, /*flushFirst=*/true,
+        /*alphaBlend=*/false);
+  }
+
+  /**
+   * Stage-2 translucent variant: alpha-blends the Metal output (water, glass)
+   * over MC's framebuffer without overwriting depth. Cutout depth in the GL
+   * depth buffer is preserved so particles z-test against opaque terrain, not
+   * against translucent geometry.
+   */
+  public void flushAndBlitTranslucent(Framebuffer mainFb) {
+    blit(mainFb, /*writeDepth=*/false, /*flushFirst=*/true,
+        /*alphaBlend=*/true);
+  }
+
+  private void blit(Framebuffer mainFb, boolean writeDepth, boolean flushFirst,
+                    boolean alphaBlend) {
     if (mainFb == null) return;
     long handle = MetalRenderClient.getHandle();
     if (handle == 0L) return;
 
-    // Wait for Metal frame to be committed and visible in IOSurface memory.
+    if (flushFirst) {
+      // Commits the current Metal command buffer so the IOSurface is up-to-date.
+      // For stage-1 (end-of-frame), nWaitForRender alone would suffice — but
+      // calling nFlushChunkPasses additionally is harmless when there's nothing
+      // to flush (it returns early if no encoder is active).
+      NativeBridge.nFlushChunkPasses(handle);
+    }
     NativeBridge.nWaitForRender(handle);
 
     if (!ensureInit()) return;
-    if (!ensureBound()) return;
+    if (!ensureBound(writeDepth)) return;
+    if (writeDepth && !depthBound) {
+      // Depth couldn't be bound; degrade gracefully to color-only blit.
+      writeDepth = false;
+    }
 
     int fbWidth = mainFb.textureWidth;
     int fbHeight = mainFb.textureHeight;
@@ -212,15 +279,17 @@ public final class MetalCompositor {
     int savedProgram = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
     int savedVao = GL11.glGetInteger(GL30.GL_VERTEX_ARRAY_BINDING);
     int savedActiveTex = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
-    int savedTexBinding;
     GL13.glActiveTexture(GL13.GL_TEXTURE0);
-    savedTexBinding = GL11.glGetInteger(GL31.GL_TEXTURE_BINDING_RECTANGLE);
+    int savedTex0 = GL11.glGetInteger(GL31.GL_TEXTURE_BINDING_RECTANGLE);
+    GL13.glActiveTexture(GL13.GL_TEXTURE1);
+    int savedTex1 = GL11.glGetInteger(GL31.GL_TEXTURE_BINDING_RECTANGLE);
     int savedDrawFb = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
     boolean savedDepthTest = GL11.glIsEnabled(GL11.GL_DEPTH_TEST);
     boolean savedBlend = GL11.glIsEnabled(GL11.GL_BLEND);
     boolean savedCullFace = GL11.glIsEnabled(GL11.GL_CULL_FACE);
     boolean savedScissor = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
     boolean savedDepthMask = GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK);
+    int savedDepthFunc = GL11.glGetInteger(GL11.GL_DEPTH_FUNC);
     int[] savedViewport = new int[4];
     GL11.glGetIntegerv(GL11.GL_VIEWPORT, savedViewport);
     int savedBlendSrcRgb = GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB);
@@ -231,26 +300,65 @@ public final class MetalCompositor {
     try {
       mainFb.beginWrite(false);
       GL11.glViewport(0, 0, fbWidth, fbHeight);
-      GL11.glDisable(GL11.GL_DEPTH_TEST);
-      GL11.glDepthMask(false);
       GL11.glDisable(GL11.GL_CULL_FACE);
       GL11.glDisable(GL11.GL_SCISSOR_TEST);
-      GL11.glEnable(GL11.GL_BLEND);
-      GL14.glBlendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA,
-                               GL11.GL_ONE,        GL11.GL_ONE_MINUS_SRC_ALPHA);
+      if (writeDepth) {
+        // Want to overwrite MC depth where Metal terrain was rendered.
+        // GL_ALWAYS makes the depth test always pass; depth write is on so
+        // gl_FragDepth gets stored.
+        GL11.glEnable(GL11.GL_DEPTH_TEST);
+        GL11.glDepthFunc(GL11.GL_ALWAYS);
+        GL11.glDepthMask(true);
+      } else {
+        GL11.glDisable(GL11.GL_DEPTH_TEST);
+        GL11.glDepthMask(false);
+      }
+      if (alphaBlend) {
+        GL11.glEnable(GL11.GL_BLEND);
+        GL14.glBlendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA,
+                                 GL11.GL_ONE,        GL11.GL_ONE_MINUS_SRC_ALPHA);
+      } else {
+        // Chunks fully overwrite vanilla output where they exist.
+        GL11.glDisable(GL11.GL_BLEND);
+      }
 
       GL20.glUseProgram(program);
       GL13.glActiveTexture(GL13.GL_TEXTURE0);
       GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, glRectTexture);
       GL20.glUniform1i(uTextureLoc, 0);
+      if (writeDepth) {
+        GL13.glActiveTexture(GL13.GL_TEXTURE1);
+        GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, glDepthRectTexture);
+        GL20.glUniform1i(uDepthLoc, 1);
+      }
       GL20.glUniform2f(uViewportLoc, (float) boundWidth, (float) boundHeight);
+      GL20.glUniform1i(uWriteDepthLoc, writeDepth ? 1 : 0);
+      GL20.glUniform1i(uPreserveAlphaLoc, alphaBlend ? 1 : 0);
 
       GL30.glBindVertexArray(vao);
       GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, 3);
+      // The IOSurface bound to glRectTexture / glDepthRectTexture is shared
+      // with Metal. Without a barrier, Metal's next render pass (which clears
+      // the IOSurface for translucent rendering) can be queued ahead of GL's
+      // sampling read on the GPU — making the blit sample an already-cleared
+      // IOSurface and discard everything. A fence sync is much cheaper than
+      // glFinish but provides the same ordering guarantee for the IOSurface
+      // read.
+      long fence = org.lwjgl.opengl.GL32.glFenceSync(
+          org.lwjgl.opengl.GL32.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+      if (fence != 0L) {
+        org.lwjgl.opengl.GL32.glClientWaitSync(
+            fence,
+            org.lwjgl.opengl.GL32.GL_SYNC_FLUSH_COMMANDS_BIT,
+            1_000_000_000L);  // 1 second timeout — should never hit it
+        org.lwjgl.opengl.GL32.glDeleteSync(fence);
+      }
     } finally {
-      // Restore in reverse-ish order (bindings/state)
       GL30.glBindVertexArray(savedVao);
-      GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, savedTexBinding);
+      GL13.glActiveTexture(GL13.GL_TEXTURE1);
+      GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, savedTex1);
+      GL13.glActiveTexture(GL13.GL_TEXTURE0);
+      GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, savedTex0);
       GL13.glActiveTexture(savedActiveTex);
       GL20.glUseProgram(savedProgram);
       GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, savedDrawFb);
@@ -260,14 +368,15 @@ public final class MetalCompositor {
       setEnabled(GL11.GL_CULL_FACE, savedCullFace);
       setEnabled(GL11.GL_SCISSOR_TEST, savedScissor);
       GL11.glDepthMask(savedDepthMask);
+      GL11.glDepthFunc(savedDepthFunc);
       GL14.glBlendFuncSeparate(savedBlendSrcRgb, savedBlendDstRgb,
                                savedBlendSrcAlpha, savedBlendDstAlpha);
     }
 
     blitFrames++;
     if (blitFrames <= 3 || (blitFrames % 600) == 0) {
-      MetalLogger.info("MetalCompositor: blit frame %d (fb=%dx%d, src=%dx%d)",
-          blitFrames, fbWidth, fbHeight, boundWidth, boundHeight);
+      MetalLogger.info("MetalCompositor: blit frame %d (fb=%dx%d, src=%dx%d, depth=%s)",
+          blitFrames, fbWidth, fbHeight, boundWidth, boundHeight, writeDepth);
     }
   }
 
@@ -284,8 +393,11 @@ public final class MetalCompositor {
       if (inst.vao != 0) GL30.glDeleteVertexArrays(inst.vao);
       if (inst.vbo != 0) GL15.glDeleteBuffers(inst.vbo);
       if (inst.glRectTexture != 0) GL11.glDeleteTextures(inst.glRectTexture);
-      inst.program = inst.vao = inst.vbo = inst.glRectTexture = 0;
+      if (inst.glDepthRectTexture != 0) GL11.glDeleteTextures(inst.glDepthRectTexture);
+      inst.program = inst.vao = inst.vbo = 0;
+      inst.glRectTexture = inst.glDepthRectTexture = 0;
       inst.boundWidth = inst.boundHeight = 0;
+      inst.depthBound = false;
       instance = null;
     }
   }

@@ -144,6 +144,8 @@ static id<MTLCommandBuffer> g_depthCmdBuffer = nil;
 static id<MTLTexture> g_blockAtlas = nil;
 static id<MTLTexture> g_lightmap = nil;
 static IOSurfaceRef g_ioSurface = NULL;
+static IOSurfaceRef g_depthMirrorIOSurface = NULL;
+static id<MTLTexture> g_depthMirror = nil;
 static id<MTLLibrary> g_shaderLibrary = nil;
 static int g_rtWidth = 16;
 static int g_rtHeight = 16;
@@ -540,9 +542,9 @@ fragment float4 fragment_entity_emissive(
       id<MTLFunction> sodiumVertFn =
           [g_shaderLibrary newFunctionWithName:@"vertex_terrain"];
       id<MTLFunction> sodiumFragFn =
-          [g_shaderLibrary newFunctionWithName:@"fragment_terrain"];
+          [g_shaderLibrary newFunctionWithName:@"fragment_terrain_chunk"];
       id<MTLFunction> sodiumFragCutoutFn =
-          [g_shaderLibrary newFunctionWithName:@"fragment_terrain_cutout"];
+          [g_shaderLibrary newFunctionWithName:@"fragment_terrain_chunk_cutout"];
       if (!sodiumVertFn || !sodiumFragFn || !sodiumFragCutoutFn) {
         dbg("WARN: Sodium chunk shaders missing (vert=%p frag=%p cutout=%p) — "
             "falling back g_pipelineOpaque to inhouse pipeline\n",
@@ -556,6 +558,8 @@ fragment float4 fragment_entity_emissive(
         opaqueDesc.fragmentFunction = sodiumFragFn;
         opaqueDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         opaqueDesc.colorAttachments[0].blendingEnabled = NO;
+        opaqueDesc.colorAttachments[1].pixelFormat = MTLPixelFormatR32Float;
+        opaqueDesc.colorAttachments[1].blendingEnabled = NO;
         opaqueDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
         opaqueDesc.label = @"SodiumTerrainOpaque";
         g_pipelineOpaque =
@@ -576,6 +580,8 @@ fragment float4 fragment_entity_emissive(
         cutoutDesc.fragmentFunction = sodiumFragCutoutFn;
         cutoutDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         cutoutDesc.colorAttachments[0].blendingEnabled = NO;
+        cutoutDesc.colorAttachments[1].pixelFormat = MTLPixelFormatR32Float;
+        cutoutDesc.colorAttachments[1].blendingEnabled = NO;
         cutoutDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
         cutoutDesc.label = @"SodiumTerrainCutout";
         g_pipelineCutout =
@@ -596,6 +602,8 @@ fragment float4 fragment_entity_emissive(
         transDesc.fragmentFunction = sodiumFragFn;
         transDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         transDesc.colorAttachments[0].blendingEnabled = YES;
+        transDesc.colorAttachments[1].pixelFormat = MTLPixelFormatR32Float;
+        transDesc.colorAttachments[1].blendingEnabled = NO;
         transDesc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
         transDesc.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
         transDesc.colorAttachments[0].sourceRGBBlendFactor =
@@ -887,6 +895,11 @@ static void ensure_offscreen() {
     CFRelease(g_ioSurface);
     g_ioSurface = NULL;
   }
+  if (g_depthMirrorIOSurface) {
+    CFRelease(g_depthMirrorIOSurface);
+    g_depthMirrorIOSurface = NULL;
+  }
+  g_depthMirror = nil;
   NSUInteger bytesPerRow = ((w * 4) + 15) & ~15;
   NSDictionary *surfaceProperties = @{
     (id)kIOSurfaceWidth : @(w),
@@ -897,6 +910,19 @@ static void ensure_offscreen() {
     (id)kIOSurfacePixelFormat : @((uint32_t)'BGRA'),
   };
   g_ioSurface = IOSurfaceCreate((__bridge CFDictionaryRef)surfaceProperties);
+  // Depth mirror: R32Float IOSurface so GL can sample fragment depth via
+  // CGLTexImageIOSurface2D and the compositor can write gl_FragDepth.
+  // OSType 'R32f' is a private code; we tag the IOSurface with arbitrary
+  // bytes-per-element=4 and let CGL bind it as GL_R32F externally.
+  NSDictionary *depthMirrorProps = @{
+    (id)kIOSurfaceWidth : @(w),
+    (id)kIOSurfaceHeight : @(h),
+    (id)kIOSurfaceBytesPerElement : @4,
+    (id)kIOSurfaceBytesPerRow : @(bytesPerRow),
+    (id)kIOSurfaceAllocSize : @(bytesPerRow * h),
+    (id)kIOSurfacePixelFormat : @((uint32_t)'L032'),
+  };
+  g_depthMirrorIOSurface = IOSurfaceCreate((__bridge CFDictionaryRef)depthMirrorProps);
   MTLTextureDescriptor *cd = [MTLTextureDescriptor
       texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                    width:w
@@ -912,6 +938,24 @@ static void ensure_offscreen() {
   if (!g_color) {
     cd.storageMode = MTLStorageModeShared;
     g_color = [g_device newTextureWithDescriptor:cd];
+  }
+  // Depth-mirror texture (R32Float, IOSurface-backed) — chunk fragment shaders
+  // write per-fragment depth here as colorAttachments[1] so GL can pick it up
+  // via CGLTexImageIOSurface2D and write gl_FragDepth in the compositor.
+  MTLTextureDescriptor *dmd = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                   width:w
+                                  height:h
+                               mipmapped:NO];
+  dmd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+  dmd.storageMode = MTLStorageModeShared;
+  if (g_depthMirrorIOSurface) {
+    g_depthMirror = [g_device newTextureWithDescriptor:dmd
+                                             iosurface:g_depthMirrorIOSurface
+                                                 plane:0];
+  }
+  if (!g_depthMirror) {
+    g_depthMirror = [g_device newTextureWithDescriptor:dmd];
   }
   MTLTextureDescriptor *dd = [MTLTextureDescriptor
       texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
@@ -988,6 +1032,12 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nBeginFrame(
   (void)fogEnd;
   ensure_device();
   ensure_offscreen();
+  // Reset the reuse-terrain-frame flag at the start of each game frame so the
+  // first encoder of the new frame CLEARs its attachments rather than LOADing
+  // stale color/depth from the previous frame's flush. nFlushChunkPasses sets
+  // this flag mid-frame for the cutout->translucent continuation, and that's
+  // the only intended LOAD scenario.
+  g_reuseTerrainFrame = false;
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawTerrain(
@@ -2360,11 +2410,23 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetCurrentFrameCon
         [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = g_color;
     bool reuseFrame = g_reuseTerrainFrame;
-    g_reuseTerrainFrame = false; 
-    rp.colorAttachments[0].loadAction =
-        reuseFrame ? MTLLoadActionLoad : MTLLoadActionClear;
+    g_reuseTerrainFrame = false;
+    // The IOSurface attachments (color + depth-mirror) ALWAYS clear at encoder
+    // start so each blit only sees fragments produced by THIS encoder. Only
+    // the actual Metal depth attachment loads when reuseFrame is set (the
+    // translucent re-encoder after a cutout flush) so translucent geometry
+    // still z-tests correctly against cutout terrain.
+    rp.colorAttachments[0].loadAction = MTLLoadActionClear;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+    if (g_depthMirror) {
+      rp.colorAttachments[1].texture = g_depthMirror;
+      rp.colorAttachments[1].loadAction = MTLLoadActionClear;
+      rp.colorAttachments[1].storeAction = MTLStoreActionStore;
+      // Far plane (1.0 in normalized depth). Compositor discards on color
+      // alpha < 0.001, so this only matters where translucent geometry lands.
+      rp.colorAttachments[1].clearColor = MTLClearColorMake(1.0, 1.0, 1.0, 1.0);
+    }
     rp.depthAttachment.texture = g_depth;
     rp.depthAttachment.loadAction =
         reuseFrame ? MTLLoadActionLoad : MTLLoadActionClear;
@@ -2902,6 +2964,71 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawChunkSection(
                                          (size_t)indexOffset * sizeof(uint32_t))];
   g_drawCallCount++;
   g_totalDraws++;
+}
+
+// Mid-frame flush: ends the current chunk encoder and commits the command
+// buffer so the IOSurface (color + depth-mirror) is visible to GL for blit.
+// After this, g_currentEncoder is nil — the next call to nGetCurrentFrameContext
+// (e.g. for the TRANSLUCENT pass) starts a fresh encoder which loads the
+// existing IOSurface contents instead of clearing.
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nFlushChunkPasses(
+    JNIEnv *, jclass, jlong handle) {
+  (void)handle;
+  if (!g_currentEncoder || !g_currentCmdBuffer)
+    return;
+  [g_currentEncoder endEncoding];
+  [g_currentEncoder release];
+  g_currentEncoder = nil;
+  if (g_frameEvent) {
+    g_eventCounter++;
+    [g_currentCmdBuffer encodeSignalEvent:g_frameEvent value:g_eventCounter];
+  }
+  if (g_depthCmdBuffer) {
+    [g_depthCmdBuffer release];
+    g_depthCmdBuffer = nil;
+  }
+  g_depthCmdBuffer = [g_currentCmdBuffer retain];
+  g_currentFrameReady = false;
+  [g_currentCmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+    (void)cb;
+    g_currentFrameReady = true;
+    if (g_frameSemaphore) {
+      dispatch_semaphore_signal(g_frameSemaphore);
+    }
+  }];
+  [g_currentCmdBuffer commit];
+  [g_currentCmdBuffer release];
+  g_currentCmdBuffer = nil;
+  g_currentPipeline = nil;
+  // Tell the next encoder to LOAD existing IOSurface contents (don't clear),
+  // so the TRANSLUCENT pass draws on top of the SOLID/CUTOUT output already
+  // composited into MC's framebuffer.
+  g_reuseTerrainFrame = true;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nBindDepthIOSurfaceToTexture(
+    JNIEnv *, jclass, jlong handle, jint glTexture) {
+  (void)handle;
+  uint64_t _t0 = mach_absolute_time();
+  if (!g_depthMirrorIOSurface || glTexture <= 0 || g_rtWidth <= 0 ||
+      g_rtHeight <= 0) {
+    return JNI_FALSE;
+  }
+  CGLContextObj cgl = CGLGetCurrentContext();
+  if (!cgl) return JNI_FALSE;
+  int w = std::max(1, (int)(g_rtWidth * g_scale));
+  int h = std::max(1, (int)(g_rtHeight * g_scale));
+  glBindTexture(GL_TEXTURE_RECTANGLE_ARB, (GLuint)glTexture);
+  CGLError err =
+      CGLTexImageIOSurface2D(cgl, GL_TEXTURE_RECTANGLE_ARB, GL_R32F,
+                             (GLsizei)w, (GLsizei)h, GL_RED, GL_FLOAT,
+                             g_depthMirrorIOSurface, 0);
+  glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
+  uint64_t _t1 = mach_absolute_time();
+  g_prof_cglBind_acc += (_t1 - _t0);
+  return (err == kCGLNoError) ? JNI_TRUE : JNI_FALSE;
 }
 
 // --- end Sodium 0.5 chunk path additions -----------------------------------

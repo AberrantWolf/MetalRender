@@ -89,6 +89,11 @@ vertex SimpleVertexOut vertex_terrain(
     float3 worldPos = localPos + chunkOffset.xyz;
     float4 viewPos = modelViewMatrix * float4(worldPos, 1.0);
     out.position = projectionMatrix * viewPos;
+    // MC projection is GL-style (clip-space z in [-w, w]); Metal expects
+    // D3D-style [0, w]. Remap so the rasterizer-written depth values match
+    // GL's window-space depth and entities/clouds rendered by vanilla GL on
+    // top z-test correctly against Metal's depth.
+    out.position.z = (out.position.z + out.position.w) * 0.5;
     out.texCoord = decodeSodiumTexCoord(v.texture);
     out.color    = half4(decodeSodiumColor(v.color));
     out.lightUV  = decodeSodiumLight(v.lightData);
@@ -101,7 +106,15 @@ vertex SimpleVertexOut vertex_terrain(
     return out;
 }
 
-fragment half4 fragment_terrain(
+// Multi-target fragment output for the chunk path: color goes to MC's main
+// framebuffer via the GL compositor; depth goes to an R32Float IOSurface so
+// the GL compositor can sample it and write gl_FragDepth.
+struct ChunkFragOut {
+    half4 color [[color(0)]];
+    float depth [[color(1)]];
+};
+
+fragment ChunkFragOut fragment_terrain_chunk(
     SimpleVertexOut in [[stage_in]],
     texture2d<half> blockAtlas  [[texture(0)]],
     texture2d<half> lightmap    [[texture(1)]]
@@ -117,6 +130,52 @@ fragment half4 fragment_terrain(
     }
     // Sodium 0.5 bakes per-face shade into color.a (range ~0.5..1.0). rgb is
     // the block tint. The lightmap supplies sky/block light contribution.
+    half3 tint = in.color.rgb;
+    half shade = in.color.a;
+    half3 light = lightmap.sample(lightSampler, in.lightUV).rgb;
+    half3 finalRgb = texColor.rgb * tint * shade * light;
+    ChunkFragOut out;
+    out.color = half4(finalRgb, texColor.a);
+    // in.position.z is post-rasterization window-space depth in [0..1]; the
+    // exact value Metal writes to depthAttachment. Mirror it as a color so GL
+    // can sample and re-emit it as gl_FragDepth.
+    out.depth = in.position.z;
+    return out;
+}
+
+fragment ChunkFragOut fragment_terrain_chunk_cutout(
+    SimpleVertexOut in [[stage_in]],
+    texture2d<half> blockAtlas  [[texture(0)]],
+    texture2d<half> lightmap    [[texture(1)]]
+) {
+    constexpr sampler atlasSampler(mag_filter::nearest, min_filter::nearest, mip_filter::nearest);
+    constexpr sampler lightSampler(mag_filter::linear, min_filter::linear);
+    half4 texColor = blockAtlas.sample(atlasSampler, in.texCoord);
+    if (texColor.a < half(0.5)) discard_fragment();
+    half3 tint = in.color.rgb;
+    half shade = in.color.a;
+    half3 light = lightmap.sample(lightSampler, in.lightUV).rgb;
+    half3 finalRgb = texColor.rgb * tint * shade * light;
+    ChunkFragOut out;
+    out.color = half4(finalRgb, half(1.0));
+    out.depth = in.position.z;
+    return out;
+}
+
+// Single-output variants kept for legacy g_pipelineInhouse compatibility
+// (it links against fragment_terrain by name; the chunk path now uses the
+// _chunk* variants above). These mirror the chunk variants but emit only color.
+fragment half4 fragment_terrain(
+    SimpleVertexOut in [[stage_in]],
+    texture2d<half> blockAtlas  [[texture(0)]],
+    texture2d<half> lightmap    [[texture(1)]]
+) {
+    constexpr sampler atlasSampler(mag_filter::nearest, min_filter::nearest, mip_filter::nearest);
+    constexpr sampler lightSampler(mag_filter::linear, min_filter::linear);
+    half4 texColor = blockAtlas.sample(atlasSampler, in.texCoord);
+    if (texColor.a < half(0.5)) {
+        discard_fragment();
+    }
     half3 tint = in.color.rgb;
     half shade = in.color.a;
     half3 light = lightmap.sample(lightSampler, in.lightUV).rgb;
