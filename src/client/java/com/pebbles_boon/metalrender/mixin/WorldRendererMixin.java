@@ -1,5 +1,6 @@
 package com.pebbles_boon.metalrender.mixin;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.nativebridge.NativeBridge;
 import com.pebbles_boon.metalrender.sodium.MetalTextureBridge;
@@ -54,7 +55,15 @@ public abstract class WorldRendererMixin {
     NativeBridge.nSetProjectionMatrix(handle, metalrender$projTmp);
     NativeBridge.nSetModelViewMatrix(handle, metalrender$mvTmp);
     NativeBridge.nSetCameraPosition(handle, pos.x, pos.y, pos.z);
-    NativeBridge.nBeginFrame(handle, metalrender$projTmp, metalrender$mvTmp, 0.0f, 0.0f);
+    // BackgroundRenderer.applyFog() runs before WorldRenderer.render and
+    // populates these via the RenderSystem fog state on MC 1.20.1, so by the
+    // time we read them here they reflect the active fog distance for this
+    // dimension/biome/weather. Without forwarding them, Metal terrain
+    // renders without distance fog and looks crisp at the far plane while
+    // vanilla GL geometry around it fades correctly.
+    float fogStart = RenderSystem.getShaderFogStart();
+    float fogEnd = RenderSystem.getShaderFogEnd();
+    NativeBridge.nBeginFrame(handle, metalrender$projTmp, metalrender$mvTmp, fogStart, fogEnd);
 
     // Mirror MC's block atlas (one-time) + lightmap (per-frame) into Metal so
     // the chunk fragment shader has real textures and lighting.

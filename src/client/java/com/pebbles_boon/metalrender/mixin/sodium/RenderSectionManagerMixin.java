@@ -89,18 +89,40 @@ public abstract class RenderSectionManagerMixin {
     return count;
   }
 
+  // Hard upper bound: must stay in sync with MetalQuadIndexBuffer.MAX_QUADS.
+  // A rebuilt section that exceeds this would index past the shared IBO and
+  // corrupt rendering; we drop the pass and warn instead.
+  @Unique
+  private static final int METALRENDER_MAX_QUADS_PER_SECTION = 65536;
+
   @Unique
   private int metalrender$capturePass(ChunkBuildOutput output, TerrainRenderPass pass, int passId,
                                       long device, long indexBuffer) {
     BuiltSectionMeshParts parts = output.getMesh(pass);
-    if (parts == null) return 0;
-    ByteBuffer vertexData = parts.getVertexData().getDirectBuffer();
     int vertexCount = 0;
-    for (VertexRange r : parts.getVertexRanges()) {
-      if (r != null) vertexCount += r.vertexCount();
+    if (parts != null) {
+      for (VertexRange r : parts.getVertexRanges()) {
+        if (r != null) vertexCount += r.vertexCount();
+      }
     }
-    if (vertexCount == 0) return 0;
-    int indexCount = (vertexCount / 4) * 6;
+    // No geometry for this pass after the rebuild — drop any prior cache slot
+    // so we don't keep drawing stale data.
+    if (parts == null || vertexCount == 0) {
+      metalrender$ours.invalidatePass(output.render.getChunkX(), output.render.getChunkY(),
+                                      output.render.getChunkZ(), passId);
+      return 0;
+    }
+    int quadCount = vertexCount / 4;
+    if (quadCount > METALRENDER_MAX_QUADS_PER_SECTION) {
+      MetalLogger.warn("Section (%d,%d,%d) pass %d has %d quads (> %d max); dropping",
+          output.render.getChunkX(), output.render.getChunkY(), output.render.getChunkZ(),
+          passId, quadCount, METALRENDER_MAX_QUADS_PER_SECTION);
+      metalrender$ours.invalidatePass(output.render.getChunkX(), output.render.getChunkY(),
+                                      output.render.getChunkZ(), passId);
+      return 0;
+    }
+    int indexCount = quadCount * 6;
+    ByteBuffer vertexData = parts.getVertexData().getDirectBuffer();
     long vbo = NativeBridge.nUploadChunkMesh(device, vertexData, vertexCount, 0);
     if (vbo == 0L) return 0;
     metalrender$ours.recordMesh(output.render, passId, vbo, indexBuffer, 0, indexCount);

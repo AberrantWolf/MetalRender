@@ -158,6 +158,26 @@ public final class MetalChunkRenderer implements ChunkRenderer {
     }
   }
 
+  /**
+   * Free one (section, pass) slot. Used when a rebuild produces no geometry
+   * for that pass — without this the prior VBO would keep drawing stale
+   * geometry indefinitely (e.g. all glass blocks in a section get broken,
+   * so TRANSLUCENT goes from non-empty to empty).
+   */
+  public void invalidatePass(int chunkX, int chunkY, int chunkZ, int passId) {
+    if (passId < 0 || passId >= 3) return;
+    long key = packCoord(chunkX, chunkY, chunkZ);
+    MetalSectionMesh[] arr = meshes.get(key);
+    if (arr == null) return;
+    MetalSectionMesh prev = arr[passId];
+    if (prev == null) return;
+    freeMesh(prev);
+    arr[passId] = null;
+    if (arr[0] == null && arr[1] == null && arr[2] == null) {
+      meshes.remove(key);
+    }
+  }
+
   /** Drop everything (renderer teardown / world unload). */
   public void clearAll() {
     int freed = 0;
