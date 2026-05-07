@@ -21,6 +21,11 @@ public abstract class WorldRendererMixin {
   // single-threaded. Keeps allocation off the per-frame hot path.
   private final float[] metalrender$projTmp = new float[16];
   private final float[] metalrender$mvTmp = new float[16];
+  // Last-seen framebuffer dimensions; on change we tell Metal to rebuild
+  // its IOSurfaces at the new size (the compositor will re-bind them on
+  // its next blit when boundWidth/Height differs).
+  private int metalrender$lastFbW = 0;
+  private int metalrender$lastFbH = 0;
 
   @Inject(method = "render", at = @At("HEAD"))
   private void metalrender$beginFrame(MatrixStack matrices, float tickDelta, long limitTime,
@@ -29,6 +34,18 @@ public abstract class WorldRendererMixin {
                                       Matrix4f positionMatrix, CallbackInfo ci) {
     if (!MetalRenderClient.isEnabled()) return;
     long handle = MetalRenderClient.getHandle();
+
+    var mc = net.minecraft.client.MinecraftClient.getInstance();
+    var fb = mc != null ? mc.getFramebuffer() : null;
+    if (fb != null) {
+      int fbW = fb.textureWidth;
+      int fbH = fb.textureHeight;
+      if (fbW > 0 && fbH > 0 && (fbW != metalrender$lastFbW || fbH != metalrender$lastFbH)) {
+        NativeBridge.nResize(handle, fbW, fbH, 1.0f);
+        metalrender$lastFbW = fbW;
+        metalrender$lastFbH = fbH;
+      }
+    }
 
     positionMatrix.get(metalrender$projTmp);
     matrices.peek().getPositionMatrix().get(metalrender$mvTmp);

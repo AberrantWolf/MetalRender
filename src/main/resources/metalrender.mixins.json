@@ -9,7 +9,8 @@
     "MinecraftClientMixin",
     "WorldRendererMixin",
     "LightmapTextureManagerAccessor",
-    "sodium.RenderSectionManagerMixin"
+    "sodium.RenderSectionManagerMixin",
+    "sodium.RenderRegionManagerMixin"
   ],
   "injectors": {
     "defaultRequire": 0

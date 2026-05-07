@@ -37,20 +37,41 @@ public final class MetalTextureBridge {
   // every frame for an entire session.
   private static int atlasRetryCountdown = 0;
 
+  // Frame counter for periodic atlas re-upload (animated textures).
+  private static int atlasFrameCounter = 0;
+  // Re-upload the block atlas every N frames so animated sprites (water flow,
+  // fire, lava, sea-lantern, prismarine, etc.) stay in sync. MC's
+  // SpriteAtlasTexture.tickAnimatedSprites updates the GL atlas per game tick;
+  // we mirror that into Metal at this cadence. Water animation is 8 frames
+  // over 32 ticks (~1.6 s) so 6 frames @ 60 fps = 100 ms is comfortably below
+  // the perception threshold for jerkiness.
+  private static final int ATLAS_REUPLOAD_INTERVAL = 6;
+  // Reusable scratch buffer for the atlas readback. Allocated lazily, sized
+  // to the atlas, kept around so we don't memAlloc/memFree 8 MB+ every
+  // re-upload. This is the only pinned native allocation for atlas mirroring.
+  private static ByteBuffer atlasScratch = null;
+  private static byte[] atlasScratchBytes = null;
+
   private MetalTextureBridge() {}
 
-  /** Per-frame entry point: ensures atlas is uploaded once, refreshes lightmap. */
+  /** Per-frame entry point: ensures atlas is uploaded, refreshes lightmap. */
   public static void updatePerFrame() {
     if (!MetalRenderClient.isEnabled()) return;
     long handle = MetalRenderClient.getHandle();
     if (handle == 0L) return;
-    uploadBlockAtlasIfNeeded(handle);
+    refreshBlockAtlas(handle);
     updateLightmap(handle);
   }
 
-  private static void uploadBlockAtlasIfNeeded(long handle) {
-    if (blockAtlasMetalHandle != 0L) return;
+  private static void refreshBlockAtlas(long handle) {
     if (atlasRetryCountdown > 0) { atlasRetryCountdown--; return; }
+    boolean firstTime = (blockAtlasMetalHandle == 0L);
+    if (!firstTime) {
+      // Throttle re-uploads after the initial bring-up.
+      atlasFrameCounter++;
+      if (atlasFrameCounter < ATLAS_REUPLOAD_INTERVAL) return;
+      atlasFrameCounter = 0;
+    }
     MinecraftClient mc = MinecraftClient.getInstance();
     if (mc.getBakedModelManager() == null) { atlasRetryCountdown = 30; return; }
     SpriteAtlasTexture atlas;
@@ -74,25 +95,40 @@ public final class MetalTextureBridge {
       return;
     }
 
+    // Atlas dims changed (e.g., resource reload) -> drop the cached handle so
+    // we recreate at the new size below.
+    if (!firstTime && (w != blockAtlasW || h != blockAtlasH)) {
+      blockAtlasMetalHandle = 0L;
+      firstTime = true;
+    }
+
     int sizeBytes = w * h * 4;
-    ByteBuffer buf = MemoryUtil.memAlloc(sizeBytes);
+    if (atlasScratch == null || atlasScratch.capacity() < sizeBytes) {
+      if (atlasScratch != null) MemoryUtil.memFree(atlasScratch);
+      atlasScratch = MemoryUtil.memAlloc(sizeBytes);
+      atlasScratchBytes = new byte[sizeBytes];
+    }
     try {
-      GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buf);
-      byte[] bytes = new byte[sizeBytes];
-      buf.get(bytes);
-      long mtlHandle = NativeBridge.nCreateTexture2D(handle, w, h, bytes);
-      if (mtlHandle == 0L) {
-        atlasRetryCountdown = 120;
-        MetalLogger.warn("Block atlas: nCreateTexture2D failed (%dx%d)", w, h);
-        return;
+      atlasScratch.clear();
+      GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, atlasScratch);
+      atlasScratch.position(0).limit(sizeBytes);
+      atlasScratch.get(atlasScratchBytes, 0, sizeBytes);
+      if (firstTime) {
+        long mtlHandle = NativeBridge.nCreateTexture2D(handle, w, h, atlasScratchBytes);
+        if (mtlHandle == 0L) {
+          atlasRetryCountdown = 120;
+          MetalLogger.warn("Block atlas: nCreateTexture2D failed (%dx%d)", w, h);
+          return;
+        }
+        NativeBridge.nBindTexture(handle, mtlHandle, 0);
+        blockAtlasMetalHandle = mtlHandle;
+        blockAtlasW = w;
+        blockAtlasH = h;
+        MetalLogger.info("Block atlas uploaded to Metal: %dx%d (%d MB)", w, h, sizeBytes / (1024 * 1024));
+      } else {
+        NativeBridge.nUpdateTexture2D(blockAtlasMetalHandle, w, h, atlasScratchBytes);
       }
-      NativeBridge.nBindTexture(handle, mtlHandle, 0);
-      blockAtlasMetalHandle = mtlHandle;
-      blockAtlasW = w;
-      blockAtlasH = h;
-      MetalLogger.info("Block atlas uploaded to Metal: %dx%d (%d MB)", w, h, sizeBytes / (1024 * 1024));
     } finally {
-      MemoryUtil.memFree(buf);
       GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevBound);
     }
   }
@@ -146,5 +182,11 @@ public final class MetalTextureBridge {
     lightmapMetalHandle = 0L;
     lightmapW = lightmapH = 0;
     atlasRetryCountdown = 0;
+    atlasFrameCounter = 0;
+    if (atlasScratch != null) {
+      MemoryUtil.memFree(atlasScratch);
+      atlasScratch = null;
+    }
+    atlasScratchBytes = null;
   }
 }

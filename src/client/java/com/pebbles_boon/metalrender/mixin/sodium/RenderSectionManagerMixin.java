@@ -31,9 +31,10 @@ import java.util.ArrayList;
  * implementation, and intercepts {@code processChunkBuildResults} to mirror
  * each section's mesh data into Metal-owned buffers.
  *
- * <p>Sodium continues to do its own GL upload alongside us during the v1
- * bring-up — this is wasteful but lets us A/B render output against the
- * vanilla Sodium path. The duplicate upload is dropped in M6.
+ * <p>{@code RenderRegionManagerMixin} cancels Sodium's parallel GL VBO upload
+ * so the same {@link ChunkBuildOutput}s aren't uploaded twice; sprite-active
+ * tracking and section bookkeeping still run during meshing and the
+ * surrounding result-processing loop.
  */
 @Pseudo
 @Mixin(targets = "me.jellysquid.mods.sodium.client.render.chunk.RenderSectionManager",
