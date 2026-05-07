@@ -164,8 +164,13 @@ public final class MetalCompositor {
 
   private static void initRectTexture(int tex) {
     GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, tex);
-    GL11.glTexParameteri(GL31.GL_TEXTURE_RECTANGLE, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
-    GL11.glTexParameteri(GL31.GL_TEXTURE_RECTANGLE, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
+    // NEAREST is correct for both color and depth: the fullscreen-triangle
+    // vertex shader produces vTexCoord values exactly at texel centers, so
+    // bilinear filtering would only blend across edges. For the depth
+    // texture in particular, LINEAR produces invalid intermediate depth
+    // values where terrain meets sky.
+    GL11.glTexParameteri(GL31.GL_TEXTURE_RECTANGLE, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
+    GL11.glTexParameteri(GL31.GL_TEXTURE_RECTANGLE, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
     GL11.glTexParameteri(GL31.GL_TEXTURE_RECTANGLE, GL11.GL_TEXTURE_WRAP_S, GL13.GL_CLAMP_TO_EDGE);
     GL11.glTexParameteri(GL31.GL_TEXTURE_RECTANGLE, GL11.GL_TEXTURE_WRAP_T, GL13.GL_CLAMP_TO_EDGE);
     GL11.glBindTexture(GL31.GL_TEXTURE_RECTANGLE, 0);
