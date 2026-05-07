@@ -1,10 +1,12 @@
 package com.pebbles_boon.metalrender.sodium;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.config.MetalRenderConfig;
 import com.pebbles_boon.metalrender.nativebridge.NativeBridge;
 import com.pebbles_boon.metalrender.util.MetalLogger;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.render.FogShape;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import me.jellysquid.mods.sodium.client.gl.device.CommandList;
@@ -43,6 +45,12 @@ public final class MetalChunkRenderer implements ChunkRenderer {
   private int diagInvocations = 0;
   private static final int LOG_EVERY_N = 360; // ~ every 2s @ 60fps × 3 passes
 
+  // Fog diagnostic — log the first few SOLID-pass values plus periodic samples
+  // so it's easy to verify nUploadFogParams is receiving live values.
+  private int fogLogsRemaining = 5;
+  private int fogSampleCountdown = 0;
+  private static final int FOG_SAMPLE_INTERVAL = 600; // ~10s @ 60fps
+
   public MetalChunkRenderer() {
     MetalLogger.info("MetalChunkRenderer installed (Sodium 0.5 chunk path)");
   }
@@ -58,6 +66,32 @@ public final class MetalChunkRenderer implements ChunkRenderer {
     long handle = MetalRenderClient.getHandle();
     long frameContext = NativeBridge.nGetCurrentFrameContext(handle);
     if (frameContext == 0L) return;
+
+    // Upload fog state on the SOLID pass (passId=0). By the time Sodium calls
+    // chunkRenderer.render, BackgroundRenderer.applyFog(FOG_TERRAIN) has
+    // populated the RenderSystem fog uniforms — this is the first moment
+    // they reflect the active terrain fog for the frame. Once-per-frame is
+    // sufficient because the values don't change between SOLID/CUTOUT/
+    // TRANSLUCENT passes (FOG_TERRAIN is set once before chunk dispatch).
+    if (passId == 0) {
+      float fogStart = RenderSystem.getShaderFogStart();
+      float fogEnd = RenderSystem.getShaderFogEnd();
+      float[] fc = RenderSystem.getShaderFogColor();
+      int fogShape = (RenderSystem.getShaderFogShape() == FogShape.CYLINDER) ? 1 : 0;
+      NativeBridge.nUploadFogParams(handle, fc[0], fc[1], fc[2], 1.0f,
+                                    fogStart, fogEnd, fogShape);
+      if (fogLogsRemaining > 0) {
+        MetalLogger.info("Fog: start=%.2f end=%.2f color=(%.2f,%.2f,%.2f) shape=%s",
+            fogStart, fogEnd, fc[0], fc[1], fc[2],
+            fogShape == 1 ? "CYLINDER" : "SPHERE");
+        fogLogsRemaining--;
+      } else if (--fogSampleCountdown <= 0) {
+        MetalLogger.info("Fog (sample): start=%.2f end=%.2f color=(%.2f,%.2f,%.2f) shape=%s",
+            fogStart, fogEnd, fc[0], fc[1], fc[2],
+            fogShape == 1 ? "CYLINDER" : "SPHERE");
+        fogSampleCountdown = FOG_SAMPLE_INTERVAL;
+      }
+    }
 
     int sectionsDrawn = 0;
     Iterator<ChunkRenderList> regionIt = renderLists.iterator(pass.isReverseOrder());

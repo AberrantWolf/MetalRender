@@ -5,7 +5,6 @@ import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.nativebridge.NativeBridge;
 import com.pebbles_boon.metalrender.sodium.MetalTextureBridge;
 import net.minecraft.client.render.Camera;
-import net.minecraft.client.render.FogShape;
 import net.minecraft.client.render.GameRenderer;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.WorldRenderer;
@@ -56,25 +55,14 @@ public abstract class WorldRendererMixin {
     NativeBridge.nSetProjectionMatrix(handle, metalrender$projTmp);
     NativeBridge.nSetModelViewMatrix(handle, metalrender$mvTmp);
     NativeBridge.nSetCameraPosition(handle, pos.x, pos.y, pos.z);
-    // BackgroundRenderer.applyFog() runs before WorldRenderer.render and
-    // populates these via the RenderSystem fog state on MC 1.20.1, so by the
-    // time we read them here they reflect the active fog distance for this
-    // dimension/biome/weather. Without forwarding them, Metal terrain
-    // renders without distance fog and looks crisp at the far plane while
-    // vanilla GL geometry around it fades correctly.
-    float fogStart = RenderSystem.getShaderFogStart();
-    float fogEnd = RenderSystem.getShaderFogEnd();
-    NativeBridge.nBeginFrame(handle, metalrender$projTmp, metalrender$mvTmp, fogStart, fogEnd);
-    // Color + shape can't go through nBeginFrame (its signature predates the
-    // chunk path); push them via nUploadFogParams so the chunk shader can
-    // tint the fog correctly per dimension (overworld blue, nether red,
-    // underwater blue-tint, etc.) and pick the right distance metric
-    // (CYLINDER for underwater so the column above isn't fogged out).
-    float[] fogColor = RenderSystem.getShaderFogColor();
-    int fogShape = (RenderSystem.getShaderFogShape() == FogShape.CYLINDER) ? 1 : 0;
-    NativeBridge.nUploadFogParams(handle,
-        fogColor[0], fogColor[1], fogColor[2], 1.0f,
-        fogStart, fogEnd, fogShape);
+    // Don't read fog state here — BackgroundRenderer.applyFog runs LATER in
+    // WorldRenderer.render's body (after this HEAD inject), so at HEAD time
+    // RenderSystem.getShaderFog* still holds last frame's values (or defaults
+    // on frame 0). MetalChunkRenderer.render uploads fog at draw time, when
+    // applyFog has already settled the FOG_TERRAIN state.
+    NativeBridge.nBeginFrame(handle, metalrender$projTmp, metalrender$mvTmp,
+                             RenderSystem.getShaderFogStart(),
+                             RenderSystem.getShaderFogEnd());
 
     // Mirror MC's block atlas (one-time) + lightmap (per-frame) into Metal so
     // the chunk fragment shader has real textures and lighting.
