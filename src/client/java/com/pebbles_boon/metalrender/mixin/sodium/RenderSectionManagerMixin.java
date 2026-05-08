@@ -64,29 +64,56 @@ public abstract class RenderSectionManagerMixin {
     }
   }
 
+  // Diagnostic counters — categorize each captured output so we can verify
+  // that Sodium's quadrant re-sort flow lands here. A re-sort produces a
+  // ChunkBuildOutput whose meshes map contains ONLY the TRANSLUCENT pass
+  // (the SOLID/CUTOUT meshes are unchanged and not re-emitted). A full
+  // rebuild emits one or more of SOLID/CUTOUT.
+  // Logged every LOG_INTERVAL captures combined (full + resort + empty).
+  @Unique private int metalrender$diagFullRebuilds = 0;
+  @Unique private int metalrender$diagResortOnly = 0;
+  @Unique private int metalrender$diagEmpty = 0;
+  @Unique private static final int METALRENDER_DIAG_LOG_INTERVAL = 200;
+
   @Inject(method = "processChunkBuildResults", at = @At("HEAD"), require = 0)
   private void metalrender$capture(ArrayList<ChunkBuildOutput> results, CallbackInfo ci) {
     if (!MetalRenderClient.isEnabled() || metalrender$ours == null) return;
     long indexBuffer = MetalQuadIndexBuffer.getOrCreate();
     if (indexBuffer == 0L) return;
     long device = MetalRenderClient.getHandle();
-    int captured = 0;
     for (ChunkBuildOutput output : results) {
       if (output == null || output.render == null || output.render.isDisposed()) continue;
-      captured += metalrender$captureOutput(output, device, indexBuffer);
+      int passMask = metalrender$captureOutput(output, device, indexBuffer);
+      // bit 0=SOLID, bit 1=CUTOUT, bit 2=TRANSLUCENT
+      if (passMask == 0) {
+        metalrender$diagEmpty++;
+      } else if (passMask == 0b100) {
+        metalrender$diagResortOnly++;
+      } else {
+        metalrender$diagFullRebuilds++;
+      }
     }
-    if (captured > 0) {
-      MetalLogger.debug("Captured %d (section,pass) meshes into Metal buffers", captured);
+    int total = metalrender$diagFullRebuilds + metalrender$diagResortOnly + metalrender$diagEmpty;
+    if (total >= METALRENDER_DIAG_LOG_INTERVAL) {
+      MetalLogger.info("Capture stats over last %d outputs: full=%d resort-only=%d empty=%d",
+          total, metalrender$diagFullRebuilds, metalrender$diagResortOnly,
+          metalrender$diagEmpty);
+      metalrender$diagFullRebuilds = 0;
+      metalrender$diagResortOnly = 0;
+      metalrender$diagEmpty = 0;
     }
   }
 
   @Unique
   private int metalrender$captureOutput(ChunkBuildOutput output, long device, long indexBuffer) {
-    int count = 0;
-    count += metalrender$capturePass(output, DefaultTerrainRenderPasses.SOLID, 0, device, indexBuffer);
-    count += metalrender$capturePass(output, DefaultTerrainRenderPasses.CUTOUT, 1, device, indexBuffer);
-    count += metalrender$capturePass(output, DefaultTerrainRenderPasses.TRANSLUCENT, 2, device, indexBuffer);
-    return count;
+    int mask = 0;
+    if (metalrender$capturePass(output, DefaultTerrainRenderPasses.SOLID, 0, device, indexBuffer) != 0)
+      mask |= 0b001;
+    if (metalrender$capturePass(output, DefaultTerrainRenderPasses.CUTOUT, 1, device, indexBuffer) != 0)
+      mask |= 0b010;
+    if (metalrender$capturePass(output, DefaultTerrainRenderPasses.TRANSLUCENT, 2, device, indexBuffer) != 0)
+      mask |= 0b100;
+    return mask;
   }
 
   // Hard upper bound: must stay in sync with MetalQuadIndexBuffer.MAX_QUADS.
