@@ -8,6 +8,7 @@
   "client": [
     "MinecraftClientMixin",
     "WorldRendererMixin",
+    "WorldRendererEntityMixin",
     "LightmapTextureManagerAccessor",
     "sodium.RenderSectionManagerMixin",
     "sodium.RenderRegionManagerMixin"

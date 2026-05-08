@@ -28,6 +28,12 @@ public final class MetalRenderConfig {
   private static volatile boolean swapCutout = false;
   private static volatile boolean swapTranslucent = false;
   private static volatile boolean compositorBlitOverlay = false;
+  // Foundational entity-capture hook. When enabled, WorldRendererEntityMixin
+  // observes WorldRenderer.renderEntity calls and logs activity counters,
+  // without redirecting MC's GL entity rendering. Off by default until the
+  // full Metal entity pipeline is wired up — see MetalEntityRenderer for
+  // the planned architecture.
+  private static volatile boolean entityCaptureObserver = false;
   private static volatile boolean aggressiveFrustumCulling = true;
   private static volatile boolean occlusionCulling = false;
   private static volatile boolean dynamicQuality = false;
@@ -69,6 +75,9 @@ public final class MetalRenderConfig {
   }
   public static boolean compositorBlitOverlay() {
     return compositorBlitOverlay;
+  }
+  public static boolean entityCaptureObserver() {
+    return entityCaptureObserver;
   }
   public static boolean aggressiveFrustumCulling() {
     return aggressiveFrustumCulling;
@@ -221,6 +230,7 @@ public final class MetalRenderConfig {
     swapCutout = getBool("metalrender.swap.cutout", swapCutout);
     swapTranslucent = getBool("metalrender.swap.translucent", swapTranslucent);
     compositorBlitOverlay = getBool("metalrender.compositor.blitOverlay", compositorBlitOverlay);
+    entityCaptureObserver = getBool("metalrender.entity.observer", entityCaptureObserver);
     aggressiveFrustumCulling = getBool("metalrender.culling.frustum", aggressiveFrustumCulling);
     occlusionCulling = getBool("metalrender.culling.occlusion", occlusionCulling);
     dynamicQuality = getBool("metalrender.dynamic.enable", dynamicQuality);
