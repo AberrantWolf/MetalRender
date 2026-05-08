@@ -46,6 +46,11 @@ public class MetalRenderClient implements ClientModInitializer {
     if (!isSodiumLoaded()) {
       MetalLogger.info("Sodium not detected; chunk rendering hooks remain inert.");
     }
+    if (isIrisLoaded()) {
+      MetalLogger.info("Iris detected; MetalRender chunk path will stay disabled "
+          + "(Iris hooks Sodium's GL pipeline that we'd be replacing). Run "
+          + "without Iris to use the Metal chunk renderer.");
+    }
   }
 
   public static MetalRenderConfig getConfig() {
@@ -60,9 +65,15 @@ public class MetalRenderClient implements ClientModInitializer {
    * Whether the harness should attempt to call {@code nInit} when a window
    * becomes available. Distinct from {@link #isEnabled()} which additionally
    * requires {@code nInit} to have succeeded.
+   *
+   * <p>Iris is treated as a hard incompatibility: it hooks Sodium's GL chunk
+   * pipeline (the same one we replace), and running both would fight over
+   * draw dispatch. We bow out so Iris+Sodium can render normally instead of
+   * producing broken visuals.
    */
   public static boolean shouldInit() {
-    return metalAvailable && config != null && config.enableMetalRendering && isSodiumLoaded();
+    return metalAvailable && config != null && config.enableMetalRendering
+        && isSodiumLoaded() && !isIrisLoaded();
   }
 
   /**
@@ -116,6 +127,20 @@ public class MetalRenderClient implements ClientModInitializer {
   public static boolean isSodiumLoaded() {
     try {
       return net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("sodium");
+    } catch (Throwable t) {
+      return false;
+    }
+  }
+
+  /**
+   * True when any flavour of Iris (or Oculus, the Forge port) is loaded.
+   * Both ship the same shader-pack pipeline that hooks Sodium's GL
+   * chunk programs, so either is enough to disable us.
+   */
+  public static boolean isIrisLoaded() {
+    try {
+      var loader = net.fabricmc.loader.api.FabricLoader.getInstance();
+      return loader.isModLoaded("iris") || loader.isModLoaded("oculus");
     } catch (Throwable t) {
       return false;
     }
